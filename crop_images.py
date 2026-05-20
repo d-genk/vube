@@ -6,14 +6,109 @@ import numpy as np
 import hashlib
 from PIL import Image
 
+def detect_and_remove_low_outliers(file_paths: list):
+    """
+    Identifies and deletes files that are statistically low-end outliers in size.
+    Uses three robust complementary methods:
+    1. Direct relative check: size < 15% of median size.
+    2. Modified Z-score (using Median Absolute Deviation) < -3.5 (highly robust).
+    3. Classic Z-score < -2.5 (when std_dev is meaningful and size < 30% of median).
+    For N=2, uses a direct relative comparison (one file < 15% of the other).
+    """
+    if not file_paths:
+        return
+
+    valid_files = []
+    sizes = []
+    for path in file_paths:
+        if os.path.exists(path):
+            valid_files.append(path)
+            sizes.append(os.path.getsize(path))
+
+    if not valid_files:
+        print("No created files found to analyze.")
+        return
+
+    if len(valid_files) < 3:
+        # With 1 or 2 files, standard statistical outlier detection (MAD/std_dev) is not applicable.
+        # But we can perform a direct ratio comparison for exactly 2 files.
+        if len(valid_files) == 2:
+            s1, s2 = sizes[0], sizes[1]
+            if s2 > 0 and (s1 / s2) < 0.15:
+                try:
+                    os.remove(valid_files[0])
+                    print(f"Deleted corrupted/outlier file: '{os.path.basename(valid_files[0])}' ({s1 / 1024:.2f} KB). Reason: Size is only {s1/s2:.1%} of the other file.")
+                except Exception as e:
+                    print(f"Error deleting file '{valid_files[0]}': {e}")
+            elif s1 > 0 and (s2 / s1) < 0.15:
+                try:
+                    os.remove(valid_files[1])
+                    print(f"Deleted corrupted/outlier file: '{os.path.basename(valid_files[1])}' ({s2 / 1024:.2f} KB). Reason: Size is only {s2/s1:.1%} of the other file.")
+                except Exception as e:
+                    print(f"Error deleting file '{valid_files[1]}': {e}")
+        return
+
+    sizes = np.array(sizes, dtype=np.float64)
+    median_size = np.median(sizes)
+    mean_size = np.mean(sizes)
+    std_dev = np.std(sizes)
+    mad = np.median(np.abs(sizes - median_size))
+
+    print(f"\n--- Statistical Outlier Analysis of Created Files ---")
+    print(f"Total files analyzed: {len(valid_files)}")
+    print(f"Mean size: {mean_size / 1024:.2f} KB")
+    print(f"Median size: {median_size / 1024:.2f} KB")
+    print(f"Std Dev: {std_dev / 1024:.2f} KB")
+    print(f"Median Absolute Deviation (MAD): {mad / 1024:.2f} KB")
+
+    deleted_count = 0
+    for path, size in zip(valid_files, sizes):
+        is_outlier = False
+        reason = ""
+
+        # Method 1: Obvious relative low-end outlier compared to the median (extremely robust)
+        if size < 0.15 * median_size:
+            is_outlier = True
+            reason = f"Size ({size / 1024:.2f} KB) is less than 15% of median ({median_size / 1024:.2f} KB)"
+
+        # Method 2: Robust Modified Z-score (low-end outlier using MAD)
+        elif mad > 0:
+            mod_z = 0.6745 * (size - median_size) / mad
+            if mod_z < -3.5:
+                is_outlier = True
+                reason = f"Modified Z-score ({mod_z:.2f}) < -3.5"
+
+        # Method 3: Standard Z-score (when std_dev is significant)
+        elif not is_outlier and std_dev > 0:
+            z_score = (size - mean_size) / std_dev
+            if z_score < -2.5 and size < 0.3 * median_size:
+                is_outlier = True
+                reason = f"Z-score ({z_score:.2f}) < -2.5 and size < 30% of median"
+
+        if is_outlier:
+            try:
+                os.remove(path)
+                print(f"Deleted corrupted/outlier file: '{os.path.basename(path)}' ({size / 1024:.2f} KB). Reason: {reason}")
+                deleted_count += 1
+            except Exception as e:
+                print(f"Error deleting outlier file '{path}': {e}")
+
+    if deleted_count == 0:
+        print("No corrupted/outlier files detected.")
+    else:
+        print(f"Successfully deleted {deleted_count} corrupted/outlier file(s).")
+
+
 def process_pdf_images_dynamic(directory_path: str):
     """
     Extracts images from each PDF, ignores exact duplicates using MD5 hashing, 
     sorts them logically, calculates the document bounding box, and performs a 
-    modulo-8 phase fold check to detect underlying JPEG macroblock corruption.
+    size-based outlier detection at the end to delete corrupted files.
     """
     if not os.path.isdir(directory_path):
         raise NotADirectoryError(f"The directory path '{directory_path}' does not exist.")
+
+    created_files = []
 
     for filename in os.listdir(directory_path):
         if filename.lower().endswith(".pdf"):
@@ -85,66 +180,18 @@ def process_pdf_images_dynamic(directory_path: str):
                         elif best_box is None:
                             best_box = (0, 0, width, height) 
 
-                        # 4. Crop and Sanity Check
+                        # 4. Crop and Save
                         with Image.open(io.BytesIO(image_bytes)) as img:
                             left, top, right, bottom = best_box
                             cropped_img = img.crop((left, top, right, bottom))
                             
-                            cropped_arr = np.array(cropped_img)
-                            is_corrupt = False
+                            base_name = os.path.splitext(filename)[0]
+                            output_filename = f"{base_name}_{image_counter:02d}.png"
+                            output_path = os.path.join(directory_path, output_filename)
                             
-                            # ==========================================
-                            # Post-Processing Sanity Check: 8x8 Grid Detection
-                            # ==========================================
-                            crop_h = cropped_arr.shape[0]
-                            bottom_slice = cropped_arr[int(crop_h * 0.85):, :]
-                            
-                            if bottom_slice.size > 0:
-                                # Standardize to a 2D grayscale array regardless of original color depth
-                                if bottom_slice.ndim == 3 and bottom_slice.shape[2] >= 3:
-                                    gray_bottom = cv2.cvtColor(bottom_slice, cv2.COLOR_RGB2GRAY)
-                                else:
-                                    gray_bottom = bottom_slice
-                                    
-                                gray_float = gray_bottom.astype(np.float32)
-                                
-                                # Check horizontal 8x8 grid (vertical block boundaries)
-                                diff_x = np.abs(np.diff(gray_float, axis=1))
-                                trunc_w = (diff_x.shape[1] // 8) * 8
-                                
-                                if trunc_w >= 8:
-                                    # Fold columns into 8 phase buckets and calculate the mean difference
-                                    folded_x = diff_x[:, :trunc_w].reshape(-1, trunc_w // 8, 8).mean(axis=(0, 1))
-                                    # Add a tiny epsilon to prevent division by zero in blank images
-                                    ratio_x = np.max(folded_x) / (np.median(folded_x) + 1e-5)
-                                    
-                                    # Natural images rarely exceed ~1.2. An 8x8 JPEG grid spikes easily > 2.0
-                                    if ratio_x > 2.0:
-                                        print(f"Skipped: '{filename}' image {image_counter} (Corrupted - 8x8 Grid Detected)")
-                                        is_corrupt = True
-
-                                # Check vertical 8x8 grid (horizontal block boundaries)
-                                if not is_corrupt:
-                                    diff_y = np.abs(np.diff(gray_float, axis=0))
-                                    trunc_h = (diff_y.shape[0] // 8) * 8
-                                    
-                                    if trunc_h >= 8:
-                                        # Fold rows into 8 phase buckets
-                                        folded_y = diff_y[:trunc_h, :].reshape(trunc_h // 8, 8, -1).mean(axis=(0, 2))
-                                        ratio_y = np.max(folded_y) / (np.median(folded_y) + 1e-5)
-                                        
-                                        if ratio_y > 2.0:
-                                            print(f"Skipped: '{filename}' image {image_counter} (Corrupted - 8x8 Grid Detected)")
-                                            is_corrupt = True
-
-                            # Only save if it passed the visual sanity checks
-                            if not is_corrupt:
-                                base_name = os.path.splitext(filename)[0]
-                                output_filename = f"{base_name}_{image_counter:02d}.png"
-                                output_path = os.path.join(directory_path, output_filename)
-                                
-                                cropped_img.save(output_path, format="PNG")
-                                print(f"Success: '{filename}' image {image_counter} saved as '{output_filename}'")
+                            cropped_img.save(output_path, format="PNG")
+                            created_files.append(output_path)
+                            print(f"Success: '{filename}' image {image_counter} saved as '{output_filename}'")
                             
                         image_counter += 1 
                         
@@ -155,10 +202,14 @@ def process_pdf_images_dynamic(directory_path: str):
                 
             except Exception as e:
                 print(f"Error processing '{filename}': {e}")
+                
+    # Run the robust outlier check for corrupted/truncated files at the very end
+    if created_files:
+        detect_and_remove_low_outliers(created_files)
 
 # ==========================================
 # Example Execution
 # ==========================================
 if __name__ == "__main__":
-    target_dir = "E:/vube/sample" 
+    target_dir = "E:/vube/temp/1819_2" 
     process_pdf_images_dynamic(target_dir)
