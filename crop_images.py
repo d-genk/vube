@@ -149,35 +149,34 @@ def process_pdf_images_dynamic(directory_path: str):
                         
                         # Thresholding and Contour Detection
                         gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
-                        _, thresh = cv2.threshold(gray, 240, 255, cv2.THRESH_BINARY_INV)
-                        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        # Threshold at 250 to cleanly catch off-white document background and text
+                        _, thresh = cv2.threshold(gray, 250, 255, cv2.THRESH_BINARY_INV)
                         
-                        x_margin = width * 0.20
-                        y_margin = height * 0.20
+                        # Use morphological closing to merge text lines and paper textures 
+                        # into a single solid rectangular component representing the page.
+                        # Kernel size is computed relative to the image dimensions (2%).
+                        k_size_x = max(5, int(width * 0.02))
+                        k_size_y = max(5, int(height * 0.02))
+                        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k_size_x, k_size_y))
+                        closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
                         
+                        contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                        
+                        # Find the contour with the largest bounding box area
                         best_box = None
-                        max_area = 0
-                        
-                        # 20% Heuristic
-                        for cnt in contours:
-                            x, y, w, h = cv2.boundingRect(cnt)
-                            area = w * h
+                        if contours:
+                            candidates = []
+                            for cnt in contours:
+                                x, y, w, h = cv2.boundingRect(cnt)
+                                area = w * h
+                                candidates.append((area, x, y, x + w, y + h))
                             
-                            if (x <= x_margin and 
-                                (x + w) >= (width - x_margin) and 
-                                y <= y_margin and 
-                                (y + h) >= (height - y_margin)):
-                                
-                                if area > max_area:
-                                    max_area = area
-                                    best_box = (x, y, x + w, y + h)
-                        
-                        # Fallbacks
-                        if best_box is None and contours:
-                            largest_contour = max(contours, key=cv2.contourArea)
-                            x, y, w, h = cv2.boundingRect(largest_contour)
-                            best_box = (x, y, x + w, y + h)
-                        elif best_box is None:
+                            # Sort by area descending
+                            candidates.sort(key=lambda c: c[0], reverse=True)
+                            
+                            # The largest candidate is our document page scan
+                            best_box = (candidates[0][1], candidates[0][2], candidates[0][3], candidates[0][4])
+                        else:
                             best_box = (0, 0, width, height) 
 
                         # 4. Crop and Save
@@ -204,12 +203,12 @@ def process_pdf_images_dynamic(directory_path: str):
                 print(f"Error processing '{filename}': {e}")
                 
     # Run the robust outlier check for corrupted/truncated files at the very end
-    if created_files:
-        detect_and_remove_low_outliers(created_files)
+    # if created_files:
+        # detect_and_remove_low_outliers(created_files)
 
 # ==========================================
 # Example Execution
 # ==========================================
 if __name__ == "__main__":
-    target_dir = "E:/vube/temp/1819_2" 
+    target_dir = "E:/vube/temp/1802_1" 
     process_pdf_images_dynamic(target_dir)
