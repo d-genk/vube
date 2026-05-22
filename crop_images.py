@@ -210,5 +210,5 @@ def process_pdf_images_dynamic(directory_path: str):
 # Example Execution
 # ==========================================
 if __name__ == "__main__":
-    target_dir = "E:/vube/temp/1802_1" 
+    target_dir = "E:/vube/temp/1802_0" 
     process_pdf_images_dynamic(target_dir)
