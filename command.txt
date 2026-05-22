@@ -1,1 +1,3 @@
 python extract_archive.py filtered_archives.csv "F:/1000302/PDF/00010101_99991231" "E:/vube/temp" i --processed_csv processed_archives.csv
+
+If the image contains multiple columns of text, transcribe them sequentially.
