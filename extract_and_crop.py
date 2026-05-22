@@ -165,11 +165,11 @@ def detect_and_remove_low_outliers(file_paths: list):
                 #reason = f"Modified Z-score ({mod_z:.2f}) < -3.5"
 
         # Method 3: Standard Z-score (when std_dev is significant)
-        elif not is_outlier and std_dev > 0:
-            z_score = (size - mean_size) / std_dev
-            if z_score < -2.5 and size < 0.3 * median_size:
-                is_outlier = True
-                reason = f"Z-score ({z_score:.2f}) < -2.5 and size < 30% of median"
+        #elif not is_outlier and std_dev > 0:
+            #z_score = (size - mean_size) / std_dev
+            #if z_score < -2.5 and size < 0.3 * median_size:
+                #is_outlier = True
+                #reason = f"Z-score ({z_score:.2f}) < -2.5 and size < 30% of median"
 
         if is_outlier:
             try:
