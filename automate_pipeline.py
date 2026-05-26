@@ -18,6 +18,9 @@ import sys
 import getpass
 import argparse
 import requests
+import random
+import re
+import textwrap
 
 # Import processing functions from extract_and_crop
 try:
@@ -108,6 +111,148 @@ def split_files(files_list, max_size=1000):
     left = files_list[:mid]
     right = files_list[mid:]
     return split_files(left, max_size) + split_files(right, max_size)
+
+
+def extract_transcription(markdown_content, filename):
+    """
+    Extracts the transcription block for a specific filename from markdown content.
+    """
+    basename = os.path.basename(filename)
+    header_pattern = rf"###\s+{re.escape(basename)}"
+    match = re.search(header_pattern, markdown_content)
+    if not match:
+        return None
+        
+    start_idx = match.end()
+    next_section = re.search(r"\n###\s+", markdown_content[start_idx:])
+    if next_section:
+        section_content = markdown_content[start_idx:start_idx + next_section.start()]
+    else:
+        section_content = markdown_content[start_idx:]
+        
+    trans_match = re.search(r"-\s+\*\*transcription\*\*:\s*(.*)", section_content)
+    if not trans_match:
+        trans_match = re.search(r"\*\*transcription\*\*:\s*(.*)", section_content)
+        
+    if not trans_match:
+        return None
+        
+    first_line = trans_match.group(1).strip()
+    lines = section_content[trans_match.end():].splitlines()
+    
+    trans_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        # Stop if we hit the next metadata attribute or next heading
+        if (stripped.startswith("- **file**:") or 
+            stripped.startswith("- **image_caption**:") or 
+            stripped.startswith("- **transcription**:") or 
+            stripped.startswith("###")):
+            break
+        trans_lines.append(line)
+        
+    block_text = textwrap.dedent("\n".join(trans_lines)).strip()
+    
+    if first_line:
+        if block_text:
+            return first_line + "\n" + block_text
+        return first_line
+    return block_text
+
+
+def clean_directory_except_samples(directory, sampled_filepaths):
+    """
+    Deletes all source PDFs and PNGs in directory *except* the PNGs
+    corresponding to the randomly sampled images.
+    """
+    sampled_abs = {os.path.abspath(p) for p in sampled_filepaths}
+    deleted_count = 0
+    kept_count = 0
+    
+    for filename in os.listdir(directory):
+        filepath = os.path.join(directory, filename)
+        if os.path.isfile(filepath):
+            abs_filepath = os.path.abspath(filepath)
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in ('.pdf', '.png'):
+                if abs_filepath not in sampled_abs:
+                    try:
+                        os.remove(filepath)
+                        deleted_count += 1
+                    except Exception as e:
+                        print(f"[!] Error deleting {filename}: {e}")
+                else:
+                    kept_count += 1
+                    
+    print_status(f"Cleanup complete. Deleted {deleted_count} file(s), kept {kept_count} sampled PNG(s).")
+
+
+def process_sampling_and_cleanup(files_to_upload, job_title, is_split, num_parts, out_dir, target_subdir):
+    """
+    Selects a 1% random sample of images from the job (min 1, max 10), retrieves their transcriptions
+    from output markdown artifacts, saves them to transcriptions.md in target_subdir, and deletes
+    non-sampled PDFs/PNGs.
+    """
+    if not files_to_upload:
+        print("[!] No files to sample.")
+        return
+        
+    total_images = len(files_to_upload)
+    sample_size = int(round(total_images * 0.01))
+    sample_size = max(1, min(10, sample_size))
+    
+    sampled_files = random.sample(files_to_upload, sample_size)
+    print_status(f"Randomly sampled {sample_size} image(s) out of {total_images} (1%):")
+    for f in sampled_files:
+        print(f"  - {os.path.basename(f)}")
+        
+    # Read output markdown artifacts
+    markdown_contents = []
+    if is_split:
+        markdown_files = [f"{job_title}_{i + 1}.md" for i in range(num_parts)]
+    else:
+        markdown_files = [f"{job_title}.md"]
+        
+    for md_filename in markdown_files:
+        md_filepath = os.path.join(out_dir, md_filename)
+        if os.path.exists(md_filepath):
+            try:
+                with open(md_filepath, 'r', encoding='utf-8') as f:
+                    markdown_contents.append(f.read())
+            except Exception as e:
+                print(f"[!] Error reading markdown file {md_filepath}: {e}")
+        else:
+            print(f"[!] Warning: Expected markdown output file {md_filepath} does not exist.")
+            
+    combined_markdown = "\n\n".join(markdown_contents)
+    
+    # Extract transcriptions for sampled files
+    transcriptions = {}
+    for filepath in sampled_files:
+        basename = os.path.basename(filepath)
+        trans = extract_transcription(combined_markdown, basename)
+        if trans:
+            transcriptions[basename] = trans
+        else:
+            transcriptions[basename] = "Transcription not found in the output markdown file."
+            
+    # Write transcriptions to target_subdir/transcriptions.md
+    output_md_path = os.path.join(target_subdir, "transcriptions.md")
+    try:
+        with open(output_md_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Sampled Transcriptions for {job_title}\n\n")
+            f.write(f"This file contains transcriptions for a random 1% sample of images (total: {sample_size}).\n\n")
+            for filename, trans_text in transcriptions.items():
+                f.write(f"## {filename}\n\n")
+                f.write(f"{trans_text}\n\n")
+                f.write("---\n\n")
+        print_status(f"Stored sampled transcriptions in: {output_md_path}")
+    except Exception as e:
+        print(f"[!] Error writing transcriptions to {output_md_path}: {e}")
+        
+    # Clean up PDF and PNG source files except the sampled PNGs
+    print_status("Cleaning up source PDFs and PNGs in target directory...")
+    clean_directory_except_samples(target_subdir, sampled_files)
 
 
 def main():
@@ -291,6 +436,16 @@ def main():
                 else:
                     print_status(f"No artifacts returned for part {part_idx + 1} of {job_title}.")
             print_status(f"Run {run_idx} sequential execution completed successfully!")
+            
+            # Post-processing: 1% sampling, transcription extraction, and cleanup
+            process_sampling_and_cleanup(
+                files_to_upload=files_to_upload,
+                job_title=job_title,
+                is_split=True,
+                num_parts=len(parts),
+                out_dir=args.out_dir,
+                target_subdir=target_subdir
+            )
         else:
             # Phase 4: Submit job to the pipeline
             print_status("Phase 4: Submitting job to Archivault processing pipeline...")
@@ -312,6 +467,16 @@ def main():
                 print_status("Phase 5: Downloading output transcription artifacts...")
                 download_artifacts_by_title(artifacts, args.out_dir, job_title)
                 print_status(f"Run {run_idx} sequential execution completed successfully!")
+                
+                # Post-processing: 1% sampling, transcription extraction, and cleanup
+                process_sampling_and_cleanup(
+                    files_to_upload=files_to_upload,
+                    job_title=job_title,
+                    is_split=False,
+                    num_parts=1,
+                    out_dir=args.out_dir,
+                    target_subdir=target_subdir
+                )
             else:
                 print_status(f"No artifacts returned for this job. Run {run_idx} complete.")
             
