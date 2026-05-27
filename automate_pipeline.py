@@ -21,6 +21,8 @@ import requests
 import random
 import re
 import textwrap
+import time
+import datetime
 
 # Import processing functions from extract_and_crop
 try:
@@ -202,6 +204,7 @@ def process_sampling_and_cleanup(files_to_upload, job_title, is_split, num_parts
     sample_size = max(1, min(10, sample_size))
     
     sampled_files = random.sample(files_to_upload, sample_size)
+    sampled_files.sort(key=os.path.basename)
     print_status(f"Randomly sampled {sample_size} image(s) out of {total_images} (1%):")
     for f in sampled_files:
         print(f"  - {os.path.basename(f)}")
@@ -280,8 +283,11 @@ def main():
     parser.add_argument("--state", default="", help="State/Province")
     parser.add_argument("--description", default="", help="Job description")
     parser.add_argument("--delete-data", action="store_true", help="Delete data from S3 after processing")
+    parser.add_argument("--log-file", default="pipeline_run_log.txt", help="Path to log file tracking execution stats")
     
     args = parser.parse_args()
+    
+    start_time = time.time()
     
     print("\n" + "="*60)
     print("    ARCHIVE PROCESSING & JOB SUBMISSION PIPELINE    ")
@@ -319,6 +325,7 @@ def main():
     print()
     
     # 4. Sequentially execute runs
+    total_images_processed = 0
     for run_idx in range(1, iterations + 1):
         print("\n" + "="*60)
         print(f"    SEQUENTIAL RUN {run_idx} OF {iterations}")
@@ -427,6 +434,7 @@ def main():
                     description=args.description,
                     metadata=metadata
                 )
+                total_images_processed += len(part_files)
                 
                 # Phase 5: Download output artifacts named after the job title
                 if artifacts:
@@ -461,6 +469,7 @@ def main():
                 description=args.description,
                 metadata=metadata
             )
+            total_images_processed += len(files_to_upload)
             
             # Phase 5: Download output artifacts named after the job title
             if artifacts:
@@ -483,6 +492,17 @@ def main():
     print("\n" + "="*60)
     print("    PIPELINE SEQUENTIAL RUNS COMPLETE    ")
     print("="*60 + "\n")
+    
+    elapsed_time = time.time() - start_time
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] Run complete. Total time elapsed: {elapsed_time:.2f} seconds | Total images successfully processed: {total_images_processed}\n"
+    
+    try:
+        with open(args.log_file, 'a', encoding='utf-8') as f:
+            f.write(log_line)
+        print_status(f"Execution stats logged successfully to '{args.log_file}'")
+    except Exception as e:
+        print(f"[!] Error writing to log file {args.log_file}: {e}")
 
 
 if __name__ == "__main__":
