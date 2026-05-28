@@ -113,12 +113,47 @@ def submit_job(api_url, token, directory, files_to_upload, title, steps, country
         if not content_type:
             content_type = "application/octet-stream"
             
-        print_status(f"Uploading {filename}...")
-        with open(filepath, 'rb') as f:
-            upload_resp = requests.put(upload_url, headers={"Content-Type": content_type}, data=f)
+        max_retries = 5
+        base_delay = 1.0  # seconds
+        success = False
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                if attempt > 1:
+                    print_status(f"Uploading {filename} (attempt {attempt}/{max_retries})...")
+                else:
+                    print_status(f"Uploading {filename}...")
+                
+                with open(filepath, 'rb') as f:
+                    upload_resp = requests.put(
+                        upload_url,
+                        headers={"Content-Type": content_type},
+                        data=f,
+                        timeout=60
+                    )
+                
+                if upload_resp.ok:
+                    success = True
+                    break
+                
+                # Check for transient errors (5xx)
+                if upload_resp.status_code in [500, 502, 503, 504]:
+                    print(f"[!] S3 returned transient error status {upload_resp.status_code} during upload.")
+                else:
+                    # Non-transient errors (e.g., 400, 403, 404, etc.)
+                    print(f"[!] Failed to upload {filename}: {upload_resp.status_code} - {upload_resp.text}")
+                    sys.exit(1)
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"[!] Connection/network error during upload: {e}")
             
-        if not upload_resp.ok:
-            print(f"[!] Failed to upload {filename}: {upload_resp.status_code}")
+            if attempt < max_retries:
+                delay = base_delay * (2 ** (attempt - 1))
+                print_status(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+                
+        if not success:
+            print(f"[!] Failed to upload {filename} after {max_retries} attempts.")
             sys.exit(1)
             
     # 3. Handle PDFs if any
@@ -252,6 +287,7 @@ def main():
     parser.add_argument("--no-retain-punctuation", action="store_false", dest="retain_punctuation_and_spelling", help="Do not retain punctuation and spelling (default: True)")
     parser.add_argument("--normalize-to-modern", action="store_true", dest="normalize_to_modern_language", help="Normalize to modern language (default: False)")
     parser.add_argument("--ignore-marginalia", action="store_true", help="Ignore marginalia (default: False)")
+    parser.add_argument("--transcription-instructions", default="", help="Custom project-specific transcription instructions (max 500 characters)")
     
     args = parser.parse_args()
     
@@ -326,7 +362,8 @@ def main():
         "additional_context_modules": args.additional_context_modules,
         "foliation_file": foliation_file,
         "foliation_override_discrete": foliation_override_discrete,
-        "delete_data": args.delete_data
+        "delete_data": args.delete_data,
+        "transcription_instructions": args.transcription_instructions
     }
     
     job_id, artifacts = submit_job(

@@ -102,7 +102,7 @@ def filter_pdf_files(files_list):
     return filtered_list
 
 
-def split_files(files_list, max_size=1000):
+def split_files(files_list, max_size=2000):
     """
     Recursively divides a list of files in half until all resulting
     sublists contain at most max_size files.
@@ -278,6 +278,7 @@ def main():
     
     # Metadata Override Options (defaults match user requirements)
     parser.add_argument("--transcription-model", default="gemini-3.1-pro", help="Transcription model (default: gemini-3.1-pro)")
+    parser.add_argument("--transcription-instructions", default="", help="Custom project-specific transcription instructions (max 500 characters)")
     parser.add_argument("--steps", nargs="*", default=["transcribe"], help="Processing steps (default: transcribe)")
     parser.add_argument("--country", default="", help="Country of origin")
     parser.add_argument("--state", default="", help="State/Province")
@@ -326,6 +327,7 @@ def main():
     
     # 4. Sequentially execute runs
     total_images_processed = 0
+    total_archives_processed = 0
     for run_idx in range(1, iterations + 1):
         print("\n" + "="*60)
         print(f"    SEQUENTIAL RUN {run_idx} OF {iterations}")
@@ -344,6 +346,8 @@ def main():
         if not selected_archive:
             print_status("Warning: No available archives found. Pipeline sequential loop complete.")
             break
+            
+        total_archives_processed += 1
             
         # Job title should be the name of the ZIP archive with .zip removed
         archive_lower = selected_archive.lower()
@@ -408,14 +412,15 @@ def main():
             "additional_context_modules": ["foliation", "metadata", "transcription", "ner", "aggregation", "captioning", "layout"],
             "foliation_file": "",
             "foliation_override_discrete": False,
-            "delete_data": args.delete_data
+            "delete_data": args.delete_data,
+            "transcription_instructions": args.transcription_instructions
         }
         
-        # Split files if we have more than 1000 images
-        parts = split_files(files_to_upload, max_size=1000)
+        # Split files if we have more than 2000 images
+        parts = split_files(files_to_upload, max_size=2000)
         
         if len(parts) > 1:
-            print_status(f"Job consists of {len(files_to_upload)} images (exceeds 1000). Divided into {len(parts)} parts for sequential processing.")
+            print_status(f"Job consists of {len(files_to_upload)} images (exceeds 2000). Divided into {len(parts)} parts for sequential processing.")
             for part_idx, part_files in enumerate(parts):
                 part_title = f"{job_title}_{part_idx + 1}"
                 print_status(f"\n--- Processing Part {part_idx + 1} of {len(parts)}: '{part_title}' ({len(part_files)} images) ---")
@@ -495,7 +500,7 @@ def main():
     
     elapsed_time = time.time() - start_time
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] Run complete. Total time elapsed: {elapsed_time:.2f} seconds | Total images successfully processed: {total_images_processed}\n"
+    log_line = f"[{timestamp}] Run complete. Total time elapsed: {elapsed_time:.2f} seconds | Total ZIP archives processed: {total_archives_processed} | Total images successfully processed: {total_images_processed}\n"
     
     try:
         with open(args.log_file, 'a', encoding='utf-8') as f:
