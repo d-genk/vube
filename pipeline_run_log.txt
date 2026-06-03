@@ -4,3 +4,7 @@
 [2026-05-27 11:50:04] Run complete. Total time elapsed: 4115.01 seconds | Total images successfully processed: 3585
 [2026-05-27 17:48:34] Run complete. Total time elapsed: 17724.26 seconds | Total ZIP archives processed: 19 | Total images successfully processed: 9586
 [2026-05-27 19:29:55] Run complete. Total time elapsed: 5650.98 seconds | Total ZIP archives processed: 6 | Total images successfully processed: 2399
+[2026-05-28 19:55:58] Run complete. Total time elapsed: 38790.14 seconds | Total ZIP archives processed: 30 | Total images successfully processed: 14688
+[2026-06-02 17:25:19] Run complete. Total time elapsed: 27625.77 seconds | Total ZIP archives processed: 25 | Total images successfully processed: 11165
+[2026-06-02 18:03:44] Run complete. Local processing time: 151.77 seconds | Upload time: 1070.07 seconds | Remote inference time: 885.22 seconds | Total ZIP archives processed: 2 | Total images successfully processed: 815 | Total image size: 2.19 GB (2354637111 bytes) | Job sizes: 1801_0_2198: 1.83 GB (1966910130 bytes), 1801_2_6935: 369.77 MB (387726981 bytes)
+[2026-06-02 18:29:10] Run complete. Local processing time: 120.18 seconds | Upload time: 800.62 seconds | Remote inference time: 186.85 seconds | Total ZIP archives processed: 1 | Total images successfully processed: 563 | Total image size: 1.68 GB (1799960473 bytes) | Job sizes: 1800_1_1468: 1.68 GB (1799960473 bytes)

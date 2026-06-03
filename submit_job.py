@@ -73,6 +73,7 @@ def get_files_to_upload(directory):
 def submit_job(api_url, token, directory, files_to_upload, title, steps, country, state, description, metadata):
     headers = {"Authorization": f"Bearer {token}"}
     
+    upload_start = time.time()
     # 1. Presign
     print_status(f"Requesting presigned URLs for {len(files_to_upload)} files...")
     filenames = [os.path.basename(f) for f in files_to_upload]
@@ -156,6 +157,9 @@ def submit_job(api_url, token, directory, files_to_upload, title, steps, country
             print(f"[!] Failed to upload {filename} after {max_retries} attempts.")
             sys.exit(1)
             
+    upload_duration = time.time() - upload_start
+    inference_start = time.time()
+            
     # 3. Handle PDFs if any
     if pdf_count > 0:
         print_status(f"Initializing PDF processing for {pdf_count} PDF(s)...")
@@ -215,8 +219,8 @@ def submit_job(api_url, token, directory, files_to_upload, title, steps, country
             
         print_status(f"Status: {st}...")
         time.sleep(30)
-        
-    return job_id, artifacts
+    inference_duration = time.time() - inference_start
+    return job_id, artifacts, upload_duration, inference_duration
 
 def download_artifacts(artifacts, output_dir):
     if not os.path.exists(output_dir):
@@ -366,7 +370,7 @@ def main():
         "transcription_instructions": args.transcription_instructions
     }
     
-    job_id, artifacts = submit_job(
+    job_id, artifacts, upload_duration, inference_duration = submit_job(
         api_url=args.api_url,
         token=token,
         directory=args.dir,

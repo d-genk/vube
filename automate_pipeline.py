@@ -164,19 +164,21 @@ def extract_transcription(markdown_content, filename):
 
 def clean_directory_except_samples(directory, sampled_filepaths):
     """
-    Deletes all source PDFs and PNGs in directory *except* the PNGs
-    corresponding to the randomly sampled images.
+    Deletes all source PDFs and images in directory *except* the images
+    corresponding to the randomly sampled files.
     """
     sampled_abs = {os.path.abspath(p) for p in sampled_filepaths}
     deleted_count = 0
     kept_count = 0
+    
+    target_exts = {'.pdf', '.png', '.jpg', '.jpeg', '.tif', '.tiff'}
     
     for filename in os.listdir(directory):
         filepath = os.path.join(directory, filename)
         if os.path.isfile(filepath):
             abs_filepath = os.path.abspath(filepath)
             ext = os.path.splitext(filename)[1].lower()
-            if ext in ('.pdf', '.png'):
+            if ext in target_exts:
                 if abs_filepath not in sampled_abs:
                     try:
                         os.remove(filepath)
@@ -186,17 +188,23 @@ def clean_directory_except_samples(directory, sampled_filepaths):
                 else:
                     kept_count += 1
                     
-    print_status(f"Cleanup complete. Deleted {deleted_count} file(s), kept {kept_count} sampled PNG(s).")
+    print_status(f"Cleanup complete. Deleted {deleted_count} file(s), kept {kept_count} sampled image(s).")
 
 
-def process_sampling_and_cleanup(files_to_upload, job_title, is_split, num_parts, out_dir, target_subdir):
+def process_sampling_and_cleanup(files_to_upload, job_title, is_split, num_parts, out_dir, target_subdir, retain_samples=True):
     """
     Selects a 1% random sample of images from the job (min 1, max 10), retrieves their transcriptions
     from output markdown artifacts, saves them to transcriptions.md in target_subdir, and deletes
-    non-sampled PDFs/PNGs.
+    non-sampled PDFs/images.
+    If retain_samples is False, all local images and PDFs are deleted, and no sample/markdown is saved.
     """
     if not files_to_upload:
         print("[!] No files to sample.")
+        return
+        
+    if not retain_samples:
+        print_status("Sample retention disabled. Deleting all local images and PDFs...")
+        clean_directory_except_samples(target_subdir, [])
         return
         
     total_images = len(files_to_upload)
@@ -258,6 +266,18 @@ def process_sampling_and_cleanup(files_to_upload, job_title, is_split, num_parts
     clean_directory_except_samples(target_subdir, sampled_files)
 
 
+def format_size(size_bytes):
+    """Formats size in bytes to a human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    elif size_bytes < 1024 * 1024 * 1024:
+        return f"{size_bytes / (1024 * 1024):.2f} MB"
+    else:
+        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fully automated archive extraction, cropping, and transcription submission script.")
     
@@ -285,6 +305,8 @@ def main():
     parser.add_argument("--description", default="", help="Job description")
     parser.add_argument("--delete-data", action="store_true", help="Delete data from S3 after processing")
     parser.add_argument("--log-file", default="pipeline_run_log.txt", help="Path to log file tracking execution stats")
+    parser.add_argument("--retain-samples", action="store_true", default=True, help="Retain a random sample of images and transcription markdown (default)")
+    parser.add_argument("--no-retain-samples", action="store_false", dest="retain_samples", help="Delete all local images/PDFs and do not save sample markdown")
     
     args = parser.parse_args()
     
@@ -328,10 +350,16 @@ def main():
     # 4. Sequentially execute runs
     total_images_processed = 0
     total_archives_processed = 0
+    total_local_time = 0.0
+    total_upload_time = 0.0
+    total_inference_time = 0.0
+    job_sizes = []
     for run_idx in range(1, iterations + 1):
         print("\n" + "="*60)
         print(f"    SEQUENTIAL RUN {run_idx} OF {iterations}")
         print("="*60 + "\n")
+        
+        iter_local_start = time.time()
         
         # Phase 1: Select and extract the archive
         print_status("Phase 1: Selecting and extracting archive...")
@@ -425,9 +453,12 @@ def main():
                 part_title = f"{job_title}_{part_idx + 1}"
                 print_status(f"\n--- Processing Part {part_idx + 1} of {len(parts)}: '{part_title}' ({len(part_files)} images) ---")
                 
+                # Update local processing time up to now
+                total_local_time += time.time() - iter_local_start
+                
                 # Phase 4: Submit job to the pipeline
                 print_status(f"Phase 4: Submitting part {part_idx + 1} to Archivault processing pipeline...")
-                job_id, artifacts = submit_job(
+                job_id, artifacts, upload_dur, inference_dur = submit_job(
                     api_url=args.api_url,
                     token=token,
                     directory=target_subdir,
@@ -439,7 +470,16 @@ def main():
                     description=args.description,
                     metadata=metadata
                 )
+                total_upload_time += upload_dur
+                total_inference_time += inference_dur
+                
+                part_size = sum(os.path.getsize(f) for f in part_files)
+                job_sizes.append((part_title, part_size))
+                
                 total_images_processed += len(part_files)
+                
+                # Restart local processing timer
+                iter_local_start = time.time()
                 
                 # Phase 5: Download output artifacts named after the job title
                 if artifacts:
@@ -448,7 +488,6 @@ def main():
                     print_status(f"Part {part_idx + 1} of {job_title} completed successfully!")
                 else:
                     print_status(f"No artifacts returned for part {part_idx + 1} of {job_title}.")
-            print_status(f"Run {run_idx} sequential execution completed successfully!")
             
             # Post-processing: 1% sampling, transcription extraction, and cleanup
             process_sampling_and_cleanup(
@@ -457,12 +496,17 @@ def main():
                 is_split=True,
                 num_parts=len(parts),
                 out_dir=args.out_dir,
-                target_subdir=target_subdir
+                target_subdir=target_subdir,
+                retain_samples=args.retain_samples
             )
+            total_local_time += time.time() - iter_local_start
         else:
+            # Update local processing time up to now
+            total_local_time += time.time() - iter_local_start
+            
             # Phase 4: Submit job to the pipeline
             print_status("Phase 4: Submitting job to Archivault processing pipeline...")
-            job_id, artifacts = submit_job(
+            job_id, artifacts, upload_dur, inference_dur = submit_job(
                 api_url=args.api_url,
                 token=token,
                 directory=target_subdir,
@@ -474,7 +518,16 @@ def main():
                 description=args.description,
                 metadata=metadata
             )
+            total_upload_time += upload_dur
+            total_inference_time += inference_dur
+            
+            job_size = sum(os.path.getsize(f) for f in files_to_upload)
+            job_sizes.append((job_title, job_size))
+            
             total_images_processed += len(files_to_upload)
+            
+            # Restart local processing timer
+            iter_local_start = time.time()
             
             # Phase 5: Download output artifacts named after the job title
             if artifacts:
@@ -489,10 +542,13 @@ def main():
                     is_split=False,
                     num_parts=1,
                     out_dir=args.out_dir,
-                    target_subdir=target_subdir
+                    target_subdir=target_subdir,
+                    retain_samples=args.retain_samples
                 )
             else:
                 print_status(f"No artifacts returned for this job. Run {run_idx} complete.")
+                
+            total_local_time += time.time() - iter_local_start
             
     print("\n" + "="*60)
     print("    PIPELINE SEQUENTIAL RUNS COMPLETE    ")
@@ -500,7 +556,21 @@ def main():
     
     elapsed_time = time.time() - start_time
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] Run complete. Total time elapsed: {elapsed_time:.2f} seconds | Total ZIP archives processed: {total_archives_processed} | Total images successfully processed: {total_images_processed}\n"
+    
+    total_size_all_jobs = sum(size for title, size in job_sizes)
+    job_size_details = ", ".join([f"{title}: {format_size(size)} ({size} bytes)" for title, size in job_sizes])
+    total_size_str = f"{format_size(total_size_all_jobs)} ({total_size_all_jobs} bytes)"
+    
+    log_line = (
+        f"[{timestamp}] Run complete. "
+        f"Local processing time: {total_local_time:.2f} seconds | "
+        f"Upload time: {total_upload_time:.2f} seconds | "
+        f"Remote inference time: {total_inference_time:.2f} seconds | "
+        f"Total ZIP archives processed: {total_archives_processed} | "
+        f"Total images successfully processed: {total_images_processed} | "
+        f"Total image size: {total_size_str} | "
+        f"Job sizes: {job_size_details}\n"
+    )
     
     try:
         with open(args.log_file, 'a', encoding='utf-8') as f:
@@ -512,3 +582,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python automate_pipeline.py --no-retain-samples --delete-data --transcription-instructions "transcribe long s as s, not f. set off **article titles** with asterisks."
