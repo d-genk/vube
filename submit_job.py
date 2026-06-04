@@ -5,6 +5,7 @@ import argparse
 import requests
 import mimetypes
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DEFAULT_API_URL = "https://d2vqeenx44rrj7.cloudfront.net"
 
@@ -70,6 +71,57 @@ def get_files_to_upload(directory):
         
     return files_to_upload
 
+def _upload_single_file(item, path_map):
+    filename = item['filename']
+    upload_url = item['url']
+    
+    filepath = path_map.get(filename)
+    if not filepath:
+        print(f"[!] Warning: Presigned URL returned for unknown file {filename}")
+        return
+        
+    content_type, _ = mimetypes.guess_type(filename)
+    if not content_type:
+        content_type = "application/octet-stream"
+        
+    max_retries = 5
+    base_delay = 1.0  # seconds
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                print_status(f"Uploading {filename} (attempt {attempt}/{max_retries})...")
+            else:
+                print_status(f"Uploading {filename}...")
+            
+            with open(filepath, 'rb') as f:
+                upload_resp = requests.put(
+                    upload_url,
+                    headers={"Content-Type": content_type},
+                    data=f,
+                    timeout=60
+                )
+            
+            if upload_resp.ok:
+                return
+            
+            # Check for transient errors (5xx)
+            if upload_resp.status_code in [500, 502, 503, 504]:
+                print(f"[!] S3 returned transient error status {upload_resp.status_code} during upload.")
+            else:
+                # Non-transient errors (e.g., 400, 403, 404, etc.)
+                raise RuntimeError(f"Failed to upload {filename}: {upload_resp.status_code} - {upload_resp.text}")
+                
+        except requests.exceptions.RequestException as e:
+            print(f"[!] Connection/network error during upload: {e}")
+        
+        if attempt < max_retries:
+            delay = base_delay * (2 ** (attempt - 1))
+            print_status(f"Retrying in {delay} seconds...")
+            time.sleep(delay)
+            
+    raise RuntimeError(f"Failed to upload {filename} after {max_retries} attempts.")
+
 def submit_job(api_url, token, directory, files_to_upload, title, steps, country, state, description, metadata):
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -101,61 +153,18 @@ def submit_job(api_url, token, directory, files_to_upload, title, steps, country
     
     # 2. Upload
     path_map = {os.path.basename(p): p for p in files_to_upload}
-    for item in presigned_urls:
-        filename = item['filename']
-        upload_url = item['url']
-        
-        filepath = path_map.get(filename)
-        if not filepath:
-            print(f"[!] Warning: Presigned URL returned for unknown file {filename}")
-            continue
-            
-        content_type, _ = mimetypes.guess_type(filename)
-        if not content_type:
-            content_type = "application/octet-stream"
-            
-        max_retries = 5
-        base_delay = 1.0  # seconds
-        success = False
-        
-        for attempt in range(1, max_retries + 1):
+    print_status(f"Uploading {len(presigned_urls)} files in parallel...")
+    max_workers = min(8, len(presigned_urls))
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_upload_single_file, item, path_map): item['filename'] for item in presigned_urls}
+        for future in as_completed(futures):
+            filename = futures[future]
             try:
-                if attempt > 1:
-                    print_status(f"Uploading {filename} (attempt {attempt}/{max_retries})...")
-                else:
-                    print_status(f"Uploading {filename}...")
-                
-                with open(filepath, 'rb') as f:
-                    upload_resp = requests.put(
-                        upload_url,
-                        headers={"Content-Type": content_type},
-                        data=f,
-                        timeout=60
-                    )
-                
-                if upload_resp.ok:
-                    success = True
-                    break
-                
-                # Check for transient errors (5xx)
-                if upload_resp.status_code in [500, 502, 503, 504]:
-                    print(f"[!] S3 returned transient error status {upload_resp.status_code} during upload.")
-                else:
-                    # Non-transient errors (e.g., 400, 403, 404, etc.)
-                    print(f"[!] Failed to upload {filename}: {upload_resp.status_code} - {upload_resp.text}")
-                    sys.exit(1)
-                    
-            except requests.exceptions.RequestException as e:
-                print(f"[!] Connection/network error during upload: {e}")
-            
-            if attempt < max_retries:
-                delay = base_delay * (2 ** (attempt - 1))
-                print_status(f"Retrying in {delay} seconds...")
-                time.sleep(delay)
-                
-        if not success:
-            print(f"[!] Failed to upload {filename} after {max_retries} attempts.")
-            sys.exit(1)
+                future.result()
+            except Exception as e:
+                print(f"[!] Critical upload error on file {filename}: {e}")
+                sys.exit(1)
             
     upload_duration = time.time() - upload_start
     inference_start = time.time()
