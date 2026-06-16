@@ -24,8 +24,9 @@ def process_and_extract(archive_list_csv, archive_dir, extract_dir, drive_number
     with open(archive_list_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.reader(f)
         for row in reader:
-            if len(row) >= 3:
-                name, drive, score = row[0], row[1], int(row[2])
+            if len(row) >= 2:
+                name, drive = row[0], row[1]
+                score = int(row[2]) if len(row) >= 3 else 1
                 if drive == drive_number:
                     archives.append((name, score))
                     
@@ -301,16 +302,16 @@ if __name__ == "__main__":
     # -------------------------------------------------------------
     
     # Path to the archive selection CSV containing name, drive, and score columns
-    ARCHIVE_LIST_CSV = "filtered_archives.csv"
+    ARCHIVE_LIST_CSV = "matched_archives.csv"
     
     # Directory where ZIP archives are stored
-    ARCHIVE_DIR = "F:/1000302/PDF/00010101_99991231"
+    ARCHIVE_DIR = "F:/1000303/PDF/00010101_99991231"
     
     # Directory to extract the PDFs from the ZIP archive to
     EXTRACT_DIR = "E:/vube/temp"
     
     # Drive number/identifier to filter available ZIP archives in the CSV
-    DRIVE_NUMBER = "i"
+    DRIVE_NUMBER = "ii"
     
     # CSV file listing already processed archives to avoid duplicates
     PROCESSED_CSV = "processed_archives.csv"

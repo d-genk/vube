@@ -282,10 +282,10 @@ def main():
     parser = argparse.ArgumentParser(description="Fully automated archive extraction, cropping, and transcription submission script.")
     
     # Extraction & Selection Parameters
-    parser.add_argument("--archive-list-csv", default="filtered_archives.csv", help="Path to filtered archives list CSV")
-    parser.add_argument("--archive-dir", default="F:/1000302/PDF/00010101_99991231", help="Directory where ZIP archives are stored")
+    parser.add_argument("--archive-list-csv", default="matched_archives.csv", help="Path to filtered archives list CSV")
+    parser.add_argument("--archive-dir", default="F:/1000303/PDF/00010101_99991231", help="Directory where ZIP archives are stored")
     parser.add_argument("--extract-dir", default="E:/vube/temp", help="Directory where files will be extracted")
-    parser.add_argument("--drive-number", default="i", help="Drive number/identifier to filter available archives")
+    parser.add_argument("--drive-number", default="ii", help="Drive number/identifier to filter available archives")
     parser.add_argument("--processed-csv", default="processed_archives.csv", help="CSV listing processed archives")
     
     # PDF Image Cropping Options

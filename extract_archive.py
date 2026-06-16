@@ -14,8 +14,9 @@ def process_and_extract(archive_list_csv, archive_dir, extract_dir, drive_number
     with open(archive_list_csv, 'r', newline='', encoding='utf-8') as f:
         reader = csv.reader(f)
         for row in reader:
-            if len(row) >= 3:
-                name, drive, score = row[0], row[1], int(row[2])
+            if len(row) >= 2:
+                name, drive = row[0], row[1]
+                score = int(row[2]) if len(row) >= 3 else 1
                 if drive == drive_number:
                     archives.append((name, score))
                     
