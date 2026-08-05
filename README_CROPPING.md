@@ -8,7 +8,8 @@ makes the transcriptions worse. This tool trims it off.
 
 1. Plug in the external drive.
 2. Double-click **VubeCropper.exe**.
-3. **Browse...** to the folder of PDFs on the drive.
+3. **Browse...** to the folder on the drive. It can hold ZIP archives, loose
+   PDFs, or both, nested as deeply as you like.
 4. **Browse...** to where you want the cropped pages saved. Put this somewhere
    on the computer, not on the external drive.
 5. Press **Start**.
@@ -56,29 +57,45 @@ by default and is not remembered between runs. Cropping happens on this
 computer and costs nothing; uploading does, so it has to be asked for each
 time. Leave it off unless you specifically mean to upload.
 
+## ZIP archives
+
+Most of the dataset is ZIPs, and the app handles them directly — there is no
+need to unzip anything first. Each archive is unpacked to a temporary folder,
+cropped, and the temporary copy deleted straight away, so a drive of hundreds of
+archives never needs room for more than one unpacked at a time.
+
+Damaged archives and archives with no PDFs inside are reported and skipped; the
+run carries on rather than stopping.
+
 ## Where the files go
 
-The output folder mirrors the folder structure of the source, so two archives
-cannot overwrite each other. Pages are named with the source PDF and a
-four-digit page number:
+The output folder mirrors the folder structure of the source, and each archive
+gets its own sub-folder named after it, so two archives cannot overwrite each
+other. Pages are named with the source PDF and a four-digit page number:
 
-    The_Mischief_of_Pensions_0001.jpeg
-    The_Mischief_of_Pensions_0002.jpeg
+    PDF/00010101_99991231/vol_1812_0/doc_1_0001.jpeg
+    PDF/00010101_99991231/vol_1812_0/doc_1_0002.jpeg
 
 They are saved in the same format the provider used, at the same quality. A
 page that needed no crop is copied across untouched, byte for byte.
 
 ## If something goes wrong
 
-**"No PDF files found in that folder."** Either the folder is wrong, or the
-PDFs are in sub-folders — tick **Include sub-folders** and try again.
+**"No PDF files or ZIP archives found in that folder."** Either the folder is
+wrong, or the files are in sub-folders — tick **Include sub-folders** and try
+again.
+
+**A run was interrupted.** Just start it again. Archives that already finished
+are skipped, so it picks up roughly where it stopped. Untick **Skip archives I
+have already cropped** if you want everything redone from scratch.
 
 **Windows warns about an unrecognised app.** Click *More info* then *Run
 anyway*. The file is unsigned because we did not buy a code-signing
 certificate, not because anything is wrong with it.
 
-**Anything else** — the log panel at the bottom of the window holds the full
-detail. Copy that text into an email to Daniel.
+**Anything else** — every run appends to `crop_log.txt` in the output folder.
+Send Daniel that file; it has the full detail, including anything that scrolled
+out of the window.
 
 ---
 
@@ -96,7 +113,7 @@ Layout:
 | `crop_core.py` | finds the page inside the mount; the actual algorithm |
 | `page_extract.py` | pulls rasters out of PDFs, crops, saves, flags |
 | `vube_cropper.py` | the desktop app, and a `--cli` mode for scripting |
-| `test_crop.py` | regression harness — run after touching `crop_core.py` |
+| `test_crop.py` | regression harness — run after touching `crop_core.py`; point `VUBE_SAMPLES` at a folder of provider PDFs |
 | `preview_crop.py` | writes before/after images for a whole folder |
 | `automate_pipeline.py` | the full archive → crop → submit pipeline |
 

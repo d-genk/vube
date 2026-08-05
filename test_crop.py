@@ -25,11 +25,26 @@ import numpy as np
 
 from crop_core import detect_scan_box
 
-SAMPLE_PDFS = [
-    r"C:\Users\Daniel\Downloads\Untitled_item.pdf",
-    r"C:\Users\Daniel\Downloads\DESERTIONS_FROM_THE_BRITISH_AR.pdf",
-    r"C:\Users\Daniel\Downloads\The_Mischief_of_Pensions.pdf",
+# Any handful of provider PDFs will do. Point VUBE_SAMPLES at a folder of them,
+# or drop them in ./samples, rather than editing this list.
+SAMPLE_DIRS = [
+    os.environ.get("VUBE_SAMPLES", ""),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "samples"),
+    os.path.join(os.path.expanduser("~"), "Downloads"),
 ]
+
+
+def find_samples(limit=3):
+    for d in SAMPLE_DIRS:
+        if d and os.path.isdir(d):
+            found = sorted(os.path.join(d, f) for f in os.listdir(d)
+                           if f.lower().endswith(".pdf"))
+            if found:
+                return found[:limit]
+    return []
+
+
+SAMPLE_PDFS = find_samples()
 
 
 def legacy_box(cv_img):
@@ -188,7 +203,8 @@ def evaluate(name, fn, cases):
 def main():
     cases = build_cases()
     if not cases:
-        print("No sample PDFs found. Edit SAMPLE_PDFS at the top of this file.")
+        print("No sample PDFs found. Put a few provider PDFs in ./samples, or\n"
+              "set VUBE_SAMPLES to a folder containing them, then re-run.")
         return 1
     print(f"Built {len(cases)} test images from {len(SAMPLE_PDFS)} sample PDFs.")
     evaluate("LEGACY  (threshold 250 + largest contour)", legacy_box, cases)

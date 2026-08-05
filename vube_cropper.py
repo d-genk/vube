@@ -20,6 +20,7 @@ Three things are deliberately optional and all default to the cautious choice:
 """
 
 import argparse
+import glob
 import os
 import queue
 import sys
@@ -32,8 +33,11 @@ import numpy as np
 from PIL import Image
 
 from page_extract import (
+    count_pdfs_in_archive,
+    find_archives,
     find_pdfs,
     flag_pages,
+    process_archive,
     process_pdf,
     restore_full_page,
 )
@@ -50,14 +54,31 @@ STRETCH_LO, STRETCH_HI = 222, 255
 class CropRun:
     """One cropping job. Runs on a worker thread; reports through callbacks."""
 
-    def __init__(self, source, output_dir, recursive=True):
+    def __init__(self, source, output_dir, recursive=True, skip_done=True):
         self.source = source
         self.output_dir = output_dir
         self.recursive = recursive
+        self.skip_done = skip_done
         self.results = []
         self.flagged = []
+        self.skipped = []
         self.error = None
         self._stop = threading.Event()
+        self._logfile = None
+
+    def _already_done(self, out_dir):
+        """
+        True if this archive or PDF has output on disk from an earlier run.
+
+        A drive of several hundred archives takes a long time, and a run that
+        is stopped or interrupted should pick up where it left off rather than
+        redo everything. Equivalent to the processed_archives.csv the original
+        pipeline kept, but derived from the output itself so it cannot drift
+        out of sync with what is actually on disk.
+        """
+        return os.path.isdir(out_dir) and any(
+            f.lower().endswith((".jpeg", ".jpg", ".png", ".tif", ".tiff"))
+            for f in os.listdir(out_dir))
 
     def stop(self):
         self._stop.set()
@@ -71,43 +92,122 @@ class CropRun:
         on_progress(done, total, label) and on_log(text) are both optional.
         Returns True if the run finished without an unhandled error.
         """
+        # Everything printed to the window is also appended to a log file in
+        # the output folder, so a problem can be reported by sending one file
+        # rather than re-describing it from memory.
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            self._logfile = open(os.path.join(self.output_dir, "crop_log.txt"),
+                                 "a", encoding="utf-8")
+            import datetime
+            self._logfile.write(
+                f"\n===== run started {datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
+                f"=====\nsource: {self.source}\n")
+        except Exception:
+            self._logfile = None
+
         def log(msg):
             if on_log:
                 on_log(msg)
+            if self._logfile:
+                try:
+                    self._logfile.write(msg + "\n")
+                    self._logfile.flush()
+                except Exception:
+                    pass
 
         try:
             pdfs = find_pdfs(self.source, recursive=self.recursive)
-            if not pdfs:
-                self.error = ("No PDF files found in that folder.\n\n"
-                              "Check that you picked the right folder, and that "
-                              "'Include sub-folders' is ticked if the PDFs are "
-                              "nested inside it.")
+            archives = find_archives(self.source, recursive=self.recursive)
+            if not pdfs and not archives:
+                self.error = ("No PDF files or ZIP archives found in that folder."
+                              "\n\nCheck that you picked the right folder, and "
+                              "that 'Include sub-folders' is ticked if the files "
+                              "are nested inside it.")
                 return False
 
-            log(f"Found {len(pdfs)} PDF file(s).")
-            total = len(pdfs)
-            for i, pdf in enumerate(pdfs, 1):
-                if self.stopped:
-                    log("Stopped.")
-                    break
-                name = os.path.basename(pdf)
-                if on_progress:
-                    on_progress(i - 1, total, name)
+            if archives:
+                log(f"Found {len(archives)} ZIP archive(s)"
+                    + (f" and {len(pdfs)} loose PDF file(s)." if pdfs else "."))
+            else:
+                log(f"Found {len(pdfs)} PDF file(s).")
 
+            # Weight the bar by PDFs, not by archives -- one archive may hold a
+            # single volume or several hundred, and an archive-counted bar would
+            # sit at 1/40 for ten minutes.
+            archive_counts = {}
+            for z in archives:
+                if self.stopped:
+                    break
+                archive_counts[z] = count_pdfs_in_archive(z)
+            total = len(pdfs) + sum(archive_counts.values())
+            if archives:
+                log(f"  {total} PDF(s) in total to process.")
+            done = [0]
+
+            def page_tick(_result):
+                pass
+
+            def pdf_tick(pdf_path):
+                done[0] += 1
+                if on_progress:
+                    on_progress(min(done[0], total), total, os.path.basename(pdf_path))
+
+            for pdf in pdfs:
+                if self.stopped:
+                    break
+                pdf_tick(pdf)
                 # Mirror any sub-folder structure into the output directory so
-                # two archives cannot overwrite each other's page numbering.
+                # two sources cannot overwrite each other's page numbering.
                 out = self.output_dir
                 if os.path.isdir(self.source):
                     rel = os.path.relpath(os.path.dirname(pdf), self.source)
                     if rel not in (".", ""):
                         out = os.path.join(self.output_dir, rel)
 
+                stem = os.path.splitext(os.path.basename(pdf))[0]
+                if self.skip_done and glob.glob(os.path.join(
+                        glob.escape(out), glob.escape(stem) + "_0001.*")):
+                    self.skipped.append(pdf)
+                    log(f"  {os.path.basename(pdf)}: already done, skipping")
+                    continue
+
                 pages = process_pdf(pdf, output_dir=out,
                                     should_stop=lambda: self.stopped)
                 self.results.extend(pages)
-                cropped = sum(1 for p in pages if p.box)
-                log(f"  {name}: {len(pages)} page(s), {cropped} cropped")
+                log(f"  {os.path.basename(pdf)}: {len(pages)} page(s), "
+                    f"{sum(1 for p in pages if p.box)} cropped")
 
+            for z in archives:
+                if self.stopped:
+                    break
+                zname = os.path.basename(z)
+
+                out = self.output_dir
+                if os.path.isdir(self.source):
+                    rel = os.path.relpath(os.path.dirname(z), self.source)
+                    if rel not in (".", ""):
+                        out = os.path.join(self.output_dir, rel)
+
+                archive_out = os.path.join(out, os.path.splitext(zname)[0])
+                if self.skip_done and self._already_done(archive_out):
+                    n = archive_counts.get(z, 0)
+                    done[0] += n
+                    if on_progress:
+                        on_progress(min(done[0], total), total, zname)
+                    self.skipped.append(z)
+                    log(f"  {zname}: already done, skipping")
+                    continue
+
+                log(f"  Unpacking {zname} ({archive_counts.get(z, 0)} PDF(s))...")
+                pages = process_archive(z, out, on_page=page_tick, on_pdf=pdf_tick,
+                                        should_stop=lambda: self.stopped)
+                self.results.extend(pages)
+                log(f"  {zname}: {len(pages)} page(s), "
+                    f"{sum(1 for p in pages if p.box)} cropped")
+
+            if self.stopped:
+                log("Stopped.")
             if on_progress:
                 on_progress(total, total, "")
 
@@ -116,12 +216,26 @@ class CropRun:
             log("")
             log(f"Done. {len(self.results)} page(s) written to {self.output_dir}")
             log(f"  {cropped} cropped, {len(self.results) - cropped} left unchanged")
+            if self.skipped:
+                log(f"  {len(self.skipped)} archive(s) skipped as already done")
             if self.flagged:
                 log(f"  {len(self.flagged)} page(s) flagged for review")
             return True
         except Exception:
             self.error = traceback.format_exc()
+            if self._logfile:
+                try:
+                    self._logfile.write(self.error + "\n")
+                except Exception:
+                    pass
             return False
+        finally:
+            if self._logfile:
+                try:
+                    self._logfile.close()
+                except Exception:
+                    pass
+                self._logfile = None
 
 
 # ---------------------------------------------------------------------------
@@ -143,26 +257,32 @@ def review_thumbnail(result, max_h=560):
     import fitz
     import hashlib
 
-    doc = fitz.open(result.pdf_path)
-    try:
-        seen, counter, data = set(), 1, None
-        from page_extract import natural_key
-        for pi in range(len(doc)):
-            for info in sorted(doc[pi].get_images(full=True),
-                               key=lambda i: natural_key(i[7])):
-                blob = doc.extract_image(info[0])
-                digest = hashlib.md5(blob["image"]).hexdigest()
-                if digest in seen:
-                    continue
-                seen.add(digest)
-                if counter == result.image_index:
-                    data = blob["image"]
+    from page_extract import materialized_pdf, natural_key
+
+    # Pages that came out of a ZIP no longer have their PDF on disk, so this
+    # unpacks the one member again for the duration of the preview.
+    with materialized_pdf(result) as pdf_path:
+        if not pdf_path:
+            return None
+        doc = fitz.open(pdf_path)
+        try:
+            seen, counter, data = set(), 1, None
+            for pi in range(len(doc)):
+                for info in sorted(doc[pi].get_images(full=True),
+                                   key=lambda i: natural_key(i[7])):
+                    blob = doc.extract_image(info[0])
+                    digest = hashlib.md5(blob["image"]).hexdigest()
+                    if digest in seen:
+                        continue
+                    seen.add(digest)
+                    if counter == result.image_index:
+                        data = blob["image"]
+                        break
+                    counter += 1
+                if data:
                     break
-                counter += 1
-            if data:
-                break
-    finally:
-        doc.close()
+        finally:
+            doc.close()
 
     if data is None:
         return None
@@ -216,6 +336,7 @@ def launch_gui():
     output_var = tk.StringVar(value=settings.get("output", ""))
     recursive_var = tk.BooleanVar(value=settings.get("recursive", True))
     review_var = tk.BooleanVar(value=settings.get("review", True))
+    skip_var = tk.BooleanVar(value=settings.get("skip_done", True))
     submit_var = tk.BooleanVar(value=False)   # never remembered; always opt in
 
     state = {"run": None, "thread": None}
@@ -226,10 +347,10 @@ def launch_gui():
     frm.pack(fill="both", expand=True)
     frm.columnconfigure(1, weight=1)
 
-    ttk.Label(frm, text="Step 1  --  Where are the PDFs?",
+    ttk.Label(frm, text="Step 1  --  Where are the files?",
               font=("Segoe UI", 11, "bold")).grid(row=0, column=0, columnspan=3,
                                                   sticky="w", pady=(0, 2))
-    ttk.Label(frm, text="This folder is only ever read from.",
+    ttk.Label(frm, text="ZIP archives or loose PDFs. This folder is only ever read from.",
               foreground="#555").grid(row=1, column=0, columnspan=3, sticky="w",
                                       pady=(0, 6))
 
@@ -237,7 +358,7 @@ def launch_gui():
     ttk.Entry(frm, textvariable=source_var).grid(row=2, column=1, sticky="ew", **pad)
 
     def pick_source():
-        d = filedialog.askdirectory(title="Choose the folder containing the PDFs")
+        d = filedialog.askdirectory(title="Choose the folder of ZIP archives or PDFs")
         if d:
             source_var.set(d)
             if not output_var.get():
@@ -270,26 +391,30 @@ def launch_gui():
     ttk.Checkbutton(frm, text="Show me any pages that look unusual when finished",
                     variable=review_var).grid(row=9, column=0, columnspan=3,
                                               sticky="w", padx=12, pady=2)
+    ttk.Checkbutton(frm, text="Skip archives I have already cropped "
+                              "(lets an interrupted run resume)",
+                    variable=skip_var).grid(row=10, column=0, columnspan=3,
+                                            sticky="w", padx=12, pady=2)
     ttk.Checkbutton(frm, text="Also send the cropped pages to the transcription "
                               "API (uploads data)",
-                    variable=submit_var).grid(row=10, column=0, columnspan=3,
+                    variable=submit_var).grid(row=11, column=0, columnspan=3,
                                               sticky="w", padx=12, pady=2)
 
-    ttk.Separator(frm).grid(row=11, column=0, columnspan=3, sticky="ew", pady=10)
+    ttk.Separator(frm).grid(row=12, column=0, columnspan=3, sticky="ew", pady=10)
 
     bar = ttk.Progressbar(frm, mode="determinate")
-    bar.grid(row=12, column=0, columnspan=3, sticky="ew", padx=12)
+    bar.grid(row=13, column=0, columnspan=3, sticky="ew", padx=12)
     status = ttk.Label(frm, text="Ready.", foreground="#333")
-    status.grid(row=13, column=0, columnspan=3, sticky="w", padx=12, pady=(4, 0))
+    status.grid(row=14, column=0, columnspan=3, sticky="w", padx=12, pady=(4, 0))
 
     logbox = tk.Text(frm, height=11, wrap="none", font=("Consolas", 9),
                      background="#fbfbfb")
-    logbox.grid(row=14, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-    frm.rowconfigure(14, weight=1)
+    logbox.grid(row=15, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+    frm.rowconfigure(15, weight=1)
     logbox.configure(state="disabled")
 
     btns = ttk.Frame(frm)
-    btns.grid(row=15, column=0, columnspan=3, sticky="ew", padx=12)
+    btns.grid(row=16, column=0, columnspan=3, sticky="ew", padx=12)
     start_btn = ttk.Button(btns, text="Start")
     start_btn.pack(side="left")
     stop_btn = ttk.Button(btns, text="Stop", state="disabled")
@@ -313,7 +438,8 @@ def launch_gui():
             with open(SETTINGS_FILE, "w", encoding="utf-8") as fh:
                 json.dump({"source": source_var.get(), "output": output_var.get(),
                            "recursive": recursive_var.get(),
-                           "review": review_var.get()}, fh)
+                           "review": review_var.get(),
+                           "skip_done": skip_var.get()}, fh)
         except Exception:
             pass
 
@@ -459,7 +585,8 @@ def launch_gui():
         stop_btn.config(state="normal")
         status.config(text="Working...")
 
-        run = CropRun(src, out, recursive=recursive_var.get())
+        run = CropRun(src, out, recursive=recursive_var.get(),
+                      skip_done=skip_var.get())
         state["run"] = run
 
         def worker():
@@ -495,7 +622,8 @@ def launch_gui():
 
 def run_cli(args):
     out = args.output or os.path.join(os.getcwd(), "cropped_pages")
-    run = CropRun(args.source, out, recursive=not args.no_recursive)
+    run = CropRun(args.source, out, recursive=not args.no_recursive,
+                  skip_done=not args.redo)
     ok = run.run(on_log=print,
                  on_progress=lambda d, t, l: None)
     if not ok:
@@ -512,10 +640,12 @@ def run_cli(args):
 def main():
     ap = argparse.ArgumentParser(description=APP_NAME)
     ap.add_argument("--cli", metavar="SOURCE", dest="source",
-                    help="run without the window, on this folder")
+                    help="run without the window, on this folder of ZIPs/PDFs")
     ap.add_argument("-o", "--output", help="output folder (CLI mode)")
     ap.add_argument("--no-recursive", action="store_true",
                     help="do not search sub-folders (CLI mode)")
+    ap.add_argument("--redo", action="store_true",
+                    help="re-crop archives that already have output (CLI mode)")
     args = ap.parse_args()
 
     if args.source:

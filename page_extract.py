@@ -19,10 +19,14 @@ Two things worth knowing before changing anything here:
   digits so a directory listing stays in reading order past page 99.
 """
 
+import contextlib
 import hashlib
 import io
 import os
 import re
+import shutil
+import tempfile
+import zipfile
 
 import cv2
 import fitz  # PyMuPDF
@@ -199,11 +203,17 @@ class PageResult:
     """One extracted page, and what we decided to do with it."""
 
     __slots__ = ("path", "pdf_path", "image_index", "box", "width", "height",
-                 "size_bytes", "flags")
+                 "size_bytes", "flags", "source_archive", "archive_member")
 
-    def __init__(self, path, pdf_path, image_index, box, width, height, size_bytes):
+    def __init__(self, path, pdf_path, image_index, box, width, height, size_bytes,
+                 source_archive=None, archive_member=None):
         self.path = path
         self.pdf_path = pdf_path
+        # For pages that came out of a ZIP, pdf_path points into a scratch
+        # directory that is deleted as soon as the archive is done. These two
+        # let the review screen get the original back on demand.
+        self.source_archive = source_archive
+        self.archive_member = archive_member
         self.image_index = image_index
         self.box = box                 # None when no crop was applied
         self.width = width
@@ -268,14 +278,58 @@ def flag_pages(results):
     return [r for r in results if r.flags]
 
 
+@contextlib.contextmanager
+def materialized_pdf(result):
+    """
+    Yield a readable path to the PDF a page came from, unpacking it again if it
+    came out of an archive.
+
+    Pages cropped out of a ZIP have a pdf_path pointing into scratch space that
+    was deleted as soon as that archive finished, so the review screen cannot
+    just reopen it. Re-extracting the single member is cheap and keeps us from
+    having to hold every unpacked archive on disk until review is done.
+    Yields None if the source can no longer be found.
+    """
+    if result.pdf_path and os.path.exists(result.pdf_path):
+        yield result.pdf_path
+        return
+
+    if not (result.source_archive and result.archive_member
+            and os.path.exists(result.source_archive)):
+        yield None
+        return
+
+    tmp = tempfile.mkdtemp(prefix="vube_review_")
+    try:
+        target = os.path.join(tmp, os.path.basename(
+            result.archive_member.replace("\\", "/")))
+        with zipfile.ZipFile(result.source_archive, "r") as zf:
+            with zf.open(result.archive_member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        yield target
+    except Exception:
+        yield None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def restore_full_page(result):
     """
-    Re-write one page uncropped, straight from the PDF.
+    Re-write one page uncropped, straight from the original PDF.
 
     Used by the review screen when a crop is rejected. The original bytes are
-    still in the PDF, so nothing needs to have been kept on disk.
+    still in the PDF -- inside the archive if that is where it came from -- so
+    nothing needs to have been kept unpacked on disk.
     """
-    doc = fitz.open(result.pdf_path)
+    with materialized_pdf(result) as pdf_path:
+        if not pdf_path:
+            print(f"Could not reach the original of '{result.name}' to restore it.")
+            return None
+        return _restore_from_pdf(result, pdf_path)
+
+
+def _restore_from_pdf(result, pdf_path):
+    doc = fitz.open(pdf_path)
     try:
         seen = set()
         counter = 1
@@ -325,7 +379,8 @@ def find_pdfs(root, recursive=True):
     return found
 
 
-def process_pdf(pdf_path, output_dir=None, on_page=None, should_stop=None):
+def process_pdf(pdf_path, output_dir=None, on_page=None, should_stop=None,
+                source_archive=None, archive_member=None):
     """
     Extract, crop and write every page raster of one PDF.
 
@@ -392,7 +447,9 @@ def process_pdf(pdf_path, output_dir=None, on_page=None, should_stop=None):
                         with Image.open(path) as probe:
                             w, h = probe.size
                     res = PageResult(path, pdf_path, counter, box, w, h,
-                                     os.path.getsize(path))
+                                     os.path.getsize(path),
+                                     source_archive=source_archive,
+                                     archive_member=archive_member)
                     results.append(res)
                     if on_page:
                         on_page(res)
@@ -447,3 +504,151 @@ def process_pdf_images_dynamic(directory_path: str, run_outlier_check: bool = Fa
         detect_and_remove_low_outliers([r.path for r in all_results])
 
     return all_results
+
+
+# ---------------------------------------------------------------------------
+# ZIP archives
+#
+# The production dataset is mostly ZIPs, one archive per volume, each holding an
+# arbitrary number of PDFs. Archives are unpacked to a temporary directory one
+# at a time and deleted immediately after, so a drive of archives never needs
+# room for more than one unpacked copy.
+# ---------------------------------------------------------------------------
+
+ARCHIVE_EXTS = {".zip"}
+
+
+def find_archives(root, recursive=True):
+    """Every ZIP under a file or directory, in reading order."""
+    if os.path.isfile(root):
+        return [root] if os.path.splitext(root)[1].lower() in ARCHIVE_EXTS else []
+    found = []
+    if recursive:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort(key=natural_key)
+            for name in sorted(filenames, key=natural_key):
+                if os.path.splitext(name)[1].lower() in ARCHIVE_EXTS:
+                    found.append(os.path.join(dirpath, name))
+    else:
+        for name in sorted(os.listdir(root), key=natural_key):
+            path = os.path.join(root, name)
+            if os.path.isfile(path) and os.path.splitext(name)[1].lower() in ARCHIVE_EXTS:
+                found.append(path)
+    return found
+
+
+def _is_safe_member(name):
+    """
+    Reject archive entries that would write outside the extraction directory.
+
+    A ZIP can name its members anything, including absolute paths and ..
+    segments. Python's extractall does guard against this now, but we extract
+    members individually so the check has to be here.
+    """
+    if not name or name.startswith("__MACOSX"):
+        return False
+    normalised = name.replace("\\", "/")
+    if normalised.startswith("/") or ":" in normalised.split("/")[0]:
+        return False
+    return ".." not in normalised.split("/")
+
+
+def extract_pdfs_from_archive(zip_path, dest_dir):
+    """
+    Unpack only the PDF members of one archive into dest_dir.
+
+    Only PDFs are extracted -- the archives also carry metadata and thumbnails
+    we have no use for, and skipping them saves both time and scratch space.
+    Names are flattened to their basename, de-duplicated if the archive nests
+    the same filename in two folders.
+
+    Returns a list of (extracted path, original member name).
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+    written = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            members = [m for m in zf.infolist()
+                       if not m.is_dir()
+                       and m.filename.lower().endswith(".pdf")
+                       and _is_safe_member(m.filename)]
+            members.sort(key=lambda m: natural_key(m.filename))
+
+            used = set()
+            for m in members:
+                base = os.path.basename(m.filename.replace("\\", "/"))
+                stem, ext = os.path.splitext(base)
+                candidate, n = base, 2
+                while candidate.lower() in used:
+                    candidate = f"{stem}__{n}{ext}"
+                    n += 1
+                used.add(candidate.lower())
+
+                target = os.path.join(dest_dir, candidate)
+                with zf.open(m) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                written.append((target, m.filename))
+    except zipfile.BadZipFile:
+        print(f"Error: '{os.path.basename(zip_path)}' is not a readable ZIP file.")
+        return []
+    except Exception as e:
+        print(f"Error reading '{os.path.basename(zip_path)}': {e}")
+        return []
+    return written
+
+
+def count_pdfs_in_archive(zip_path):
+    """How many PDFs an archive holds, without unpacking it."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            return sum(1 for m in zf.infolist()
+                       if not m.is_dir()
+                       and m.filename.lower().endswith(".pdf")
+                       and _is_safe_member(m.filename))
+    except Exception:
+        return 0
+
+
+def process_archive(zip_path, output_dir, on_page=None, on_pdf=None,
+                    should_stop=None, scratch_root=None):
+    """
+    Unpack one archive to a temporary directory, crop every PDF inside it, and
+    delete the temporary copy.
+
+    Output goes to output_dir/<archive name>/ so two archives cannot collide.
+    Returns a list of PageResult.
+    """
+    name = os.path.splitext(os.path.basename(zip_path))[0]
+    out_dir = os.path.join(output_dir, name)
+    results = []
+
+    tmp = tempfile.mkdtemp(prefix="vube_", dir=scratch_root)
+    try:
+        pdfs = extract_pdfs_from_archive(zip_path, tmp)
+        if not pdfs:
+            print(f"Skipped: '{os.path.basename(zip_path)}' (no PDFs inside)")
+            return []
+        for pdf, member in pdfs:
+            if should_stop and should_stop():
+                break
+            if on_pdf:
+                on_pdf(pdf)
+            results.extend(process_pdf(pdf, output_dir=out_dir,
+                                       on_page=on_page, should_stop=should_stop,
+                                       source_archive=zip_path,
+                                       archive_member=member))
+    finally:
+        # Always clean up, including on error or a mid-run stop, so a long job
+        # over many archives cannot fill the disk with unpacked copies.
+        shutil.rmtree(tmp, ignore_errors=True)
+    return results
+
+
+def find_work(root, recursive=True):
+    """
+    Everything crop-able under a path: loose PDFs and ZIP archives.
+
+    Returns (loose_pdfs, archives). A PDF that lives inside an archive is not
+    listed in loose_pdfs; it is reached by unpacking the archive.
+    """
+    return find_pdfs(root, recursive=recursive), find_archives(root, recursive=recursive)
