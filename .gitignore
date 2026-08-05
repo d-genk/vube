@@ -1,3 +1,7 @@
 __pycache__/
 schoenfield_sample.csv
 output/
+build/
+dist/
+*.spec
+.vube_cropper.json

@@ -7,6 +7,8 @@ import mimetypes
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from page_extract import natural_key
+
 DEFAULT_API_URL = "https://d2vqeenx44rrj7.cloudfront.net"
 
 DEFAULT_METADATA_SCHEMA = {
@@ -54,17 +56,20 @@ def get_files_to_upload(directory):
     if not os.path.isdir(directory):
         print(f"[!] Directory '{directory}' does not exist.")
         sys.exit(1)
-        
+
     valid_exts = {'.pdf', '.jpg', '.jpeg', '.png', '.tif', '.tiff'}
     files_to_upload = []
-    
-    for filename in os.listdir(directory):
+
+    # Sorted numerically, not lexicographically: foliation and aggregation both
+    # depend on pages arriving in reading order, and a plain sort puts
+    # page_0100 ahead of page_0099. os.listdir alone gives no order guarantee.
+    for filename in sorted(os.listdir(directory), key=natural_key):
         filepath = os.path.join(directory, filename)
         if os.path.isfile(filepath):
             ext = os.path.splitext(filename)[1].lower()
             if ext in valid_exts:
                 files_to_upload.append(filepath)
-                
+
     if not files_to_upload:
         print(f"[!] No valid files (images/PDFs) found in {directory}")
         sys.exit(1)

@@ -289,8 +289,8 @@ def main():
     parser.add_argument("--processed-csv", default="processed_archives.csv", help="CSV listing processed archives")
     
     # PDF Image Cropping Options
-    parser.add_argument("--run-outlier-detection", action="store_true", default=True, help="Enable robust statistical outlier detection for cropped images")
-    parser.add_argument("--no-outlier-detection", action="store_false", dest="run_outlier_detection", help="Disable robust statistical outlier detection")
+    parser.add_argument("--run-outlier-detection", action="store_true", default=False, help="DELETE cropped pages whose file size is far below the batch median. Off by default: size tracks ink density, so sparse pages look identical to truncated ones and a deletion leaves no trace in the job")
+    parser.add_argument("--no-outlier-detection", action="store_false", dest="run_outlier_detection", help="Explicitly disable outlier deletion (this is the default)")
     
     # API & Job Settings
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Base API URL for the Archivault backend")
