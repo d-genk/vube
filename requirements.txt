@@ -1,0 +1,22 @@
+# Runtime dependencies for vube_cropper.py (and the modules it imports:
+# crop_core.py, page_extract.py). Everything else the app uses is stdlib.
+#
+# Install:  py -m pip install -r requirements.txt
+#
+# NOTE ON PyMuPDF: the import is `fitz`, but the package is `PyMuPDF`.
+# There is an unrelated package on PyPI actually named `fitz` -- installing
+# it will not work and is not what this code wants. Always install PyMuPDF.
+#
+# NOTE ON OpenCV: the -headless build is deliberate. Nothing here calls
+# cv2.imshow/waitKey (the UI is tkinter), so the GUI build's extra Qt
+# dependencies are dead weight on a managed machine.
+
+pillow>=10.0,<12
+opencv-python-headless>=4.8,<5
+PyMuPDF>=1.24,<2
+numpy>=1.24,<3
+
+# tkinter is NOT installable with pip -- it ships with Python itself.
+# The python.org installer and the Microsoft Store build both include it by
+# default. If `py -c "import tkinter"` fails, re-run the Python installer and
+# make sure "tcl/tk and IDLE" is ticked.

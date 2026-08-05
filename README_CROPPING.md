@@ -6,8 +6,11 @@ makes the transcriptions worse. This tool trims it off.
 
 ## The short version
 
+First time only, follow [SETUP_WINDOWS.md](SETUP_WINDOWS.md) — about ten
+minutes, once. After that:
+
 1. Plug in the external drive.
-2. Double-click **VubeCropper.exe**.
+2. Double-click **VubeCropper.cmd**.
 3. **Browse...** to the folder on the drive. It can hold ZIP archives, loose
    PDFs, or both, nested as deeply as you like.
 4. **Browse...** to where you want the cropped pages saved. Put this somewhere
@@ -89,9 +92,10 @@ again.
 are skipped, so it picks up roughly where it stopped. Untick **Skip archives I
 have already cropped** if you want everything redone from scratch.
 
-**Windows warns about an unrecognised app.** Click *More info* then *Run
-anyway*. The file is unsigned because we did not buy a code-signing
-certificate, not because anything is wrong with it.
+**Windows warns about an unrecognised app.** This should no longer happen —
+the tool now runs as plain Python source under the signed Python interpreter,
+with no compiled program of its own. If you do see the warning, stop and tell
+Daniel rather than clicking through it.
 
 **Anything else** — every run appends to `crop_log.txt` in the output folder.
 Send Daniel that file; it has the full detail, including anything that scrolled
@@ -101,10 +105,14 @@ out of the window.
 
 ## For whoever maintains this
 
-The `.exe` is built from the same source that runs in the pipeline:
+The PI runs the same source that runs in the pipeline — there is no build step
+any more. `VubeCropper.cmd` provisions a `.venv` from `requirements.txt` on
+first launch and opens the window on every launch after that; see
+[SETUP_WINDOWS.md](SETUP_WINDOWS.md).
 
-    pip install pyinstaller
-    python build_exe.py          # -> dist/VubeCropper.exe
+`build_exe.py` still produces `dist/VubeCropper.exe` via PyInstaller, but that
+executable is unsigned and is blocked by IT policy, so it is not the delivery
+route. Keep it only if a code-signing certificate turns up.
 
 Layout:
 
@@ -116,6 +124,8 @@ Layout:
 | `test_crop.py` | regression harness — run after touching `crop_core.py`; point `VUBE_SAMPLES` at a folder of provider PDFs |
 | `preview_crop.py` | writes before/after images for a whole folder |
 | `automate_pipeline.py` | the full archive → crop → submit pipeline |
+| `requirements.txt` | the four runtime dependencies; read the notes in it before changing pins |
+| `VubeCropper.cmd` | double-click launcher; builds the `.venv` on first run |
 
 Headless use, same code path as the window:
 
