@@ -27,6 +27,7 @@ import re
 import shutil
 import tempfile
 import zipfile
+import zlib
 
 import cv2
 import fitz  # PyMuPDF
@@ -40,6 +41,7 @@ from crop_core import detect_scan_box
 UPLOADABLE_EXTS = {"jpg", "jpeg", "png", "tif", "tiff"}
 JPEG_QUALITY = 95      # only used when the source quantization is unavailable
 JPEG_MCU = 16          # snap JPEG crops to this grid; see _snap_to_mcu
+LOG_FILENAME = "crop_log.txt"   # written into the output folder each run
 
 
 def natural_key(text):
@@ -203,7 +205,8 @@ class PageResult:
     """One extracted page, and what we decided to do with it."""
 
     __slots__ = ("path", "pdf_path", "image_index", "box", "width", "height",
-                 "size_bytes", "flags", "source_archive", "archive_member")
+                 "size_bytes", "flags", "source_archive", "archive_member",
+                 "discarded")
 
     def __init__(self, path, pdf_path, image_index, box, width, height, size_bytes,
                  source_archive=None, archive_member=None):
@@ -220,6 +223,7 @@ class PageResult:
         self.height = height
         self.size_bytes = size_bytes
         self.flags = []                # filled in by flag_pages()
+        self.discarded = False         # set by discard_page()
 
     @property
     def name(self):
@@ -278,6 +282,79 @@ def flag_pages(results):
     return [r for r in results if r.flags]
 
 
+# Discarded pages are moved here rather than unlinked. The uploader lists a
+# single directory and does not recurse, so a page in this sub-folder is out of
+# the job -- but it is still on disk if the call turns out to have been wrong.
+DISCARD_DIRNAME = "_discarded"
+
+
+def discard_page(result):
+    """
+    Take one page out of the output set.
+
+    Moves the file into a _discarded sub-folder beside it instead of deleting
+    it. That is enough to keep it out of the upload, and it means a mis-click
+    during review costs nothing -- undiscard_page puts it straight back.
+    Returns the new path, or None if the move failed.
+    """
+    if result.discarded:
+        return result.path
+    if not os.path.exists(result.path):
+        return None
+
+    holding = os.path.join(os.path.dirname(result.path), DISCARD_DIRNAME)
+    os.makedirs(holding, exist_ok=True)
+    target = os.path.join(holding, os.path.basename(result.path))
+    try:
+        if os.path.exists(target):
+            os.remove(target)
+        shutil.move(result.path, target)
+    except Exception as e:
+        print(f"Could not discard '{result.name}': {e}")
+        return None
+
+    result.path = target
+    result.discarded = True
+    return target
+
+
+def undiscard_page(result):
+    """Move a discarded page back into the output set."""
+    if not result.discarded:
+        return result.path
+    if not os.path.exists(result.path):
+        return None
+
+    parent = os.path.dirname(os.path.dirname(result.path))
+    target = os.path.join(parent, os.path.basename(result.path))
+    try:
+        if os.path.exists(target):
+            os.remove(target)
+        shutil.move(result.path, target)
+    except Exception as e:
+        print(f"Could not restore '{result.name}': {e}")
+        return None
+
+    result.path = target
+    result.discarded = False
+    return target
+
+
+def append_log(output_dir, message):
+    """
+    Add a line to the run log.
+
+    Review happens after the run has finished and closed its log handle, but
+    the decisions made there -- especially discards -- are exactly what someone
+    would need to see later, so they are appended the same way.
+    """
+    try:
+        with open(os.path.join(output_dir, LOG_FILENAME), "a", encoding="utf-8") as fh:
+            fh.write(message + "\n")
+    except Exception:
+        pass
+
+
 @contextlib.contextmanager
 def materialized_pdf(result):
     """
@@ -321,6 +398,8 @@ def restore_full_page(result):
     still in the PDF -- inside the archive if that is where it came from -- so
     nothing needs to have been kept unpacked on disk.
     """
+    if result.discarded and not undiscard_page(result):
+        return None
     with materialized_pdf(result) as pdf_path:
         if not pdf_path:
             print(f"Could not reach the original of '{result.name}' to restore it.")
@@ -553,7 +632,7 @@ def _is_safe_member(name):
     return ".." not in normalised.split("/")
 
 
-def extract_pdfs_from_archive(zip_path, dest_dir):
+def extract_pdfs_from_archive(zip_path, dest_dir, accept=None):
     """
     Unpack only the PDF members of one archive into dest_dir.
 
@@ -561,6 +640,9 @@ def extract_pdfs_from_archive(zip_path, dest_dir):
     we have no use for, and skipping them saves both time and scratch space.
     Names are flattened to their basename, de-duplicated if the archive nests
     the same filename in two folders.
+
+    `accept(member_name, size, crc)` may be supplied to skip members before
+    they are written -- used to leave out duplicates of PDFs already cropped.
 
     Returns a list of (extracted path, original member name).
     """
@@ -576,6 +658,8 @@ def extract_pdfs_from_archive(zip_path, dest_dir):
 
             used = set()
             for m in members:
+                if accept and not accept(m.filename, m.file_size, m.CRC):
+                    continue
                 base = os.path.basename(m.filename.replace("\\", "/"))
                 stem, ext = os.path.splitext(base)
                 candidate, n = base, 2
@@ -610,7 +694,7 @@ def count_pdfs_in_archive(zip_path):
 
 
 def process_archive(zip_path, output_dir, on_page=None, on_pdf=None,
-                    should_stop=None, scratch_root=None):
+                    should_stop=None, scratch_root=None, accept_member=None):
     """
     Unpack one archive to a temporary directory, crop every PDF inside it, and
     delete the temporary copy.
@@ -624,9 +708,8 @@ def process_archive(zip_path, output_dir, on_page=None, on_pdf=None,
 
     tmp = tempfile.mkdtemp(prefix="vube_", dir=scratch_root)
     try:
-        pdfs = extract_pdfs_from_archive(zip_path, tmp)
+        pdfs = extract_pdfs_from_archive(zip_path, tmp, accept=accept_member)
         if not pdfs:
-            print(f"Skipped: '{os.path.basename(zip_path)}' (no PDFs inside)")
             return []
         for pdf, member in pdfs:
             if should_stop and should_stop():
@@ -652,3 +735,95 @@ def find_work(root, recursive=True):
     listed in loose_pdfs; it is reached by unpacking the archive.
     """
     return find_pdfs(root, recursive=recursive), find_archives(root, recursive=recursive)
+
+
+# ---------------------------------------------------------------------------
+# Duplicate detection
+#
+# The same volume often sits on the drive twice -- loose and inside an archive,
+# or in two archives. Cropping it twice wastes time and puts two copies of every
+# page into the output, which then get uploaded twice.
+#
+# Matching is on content, not filename, so the same PDF under two different
+# names is still caught. Size is the first-pass key because it is free: for a
+# ZIP it comes out of the central directory without unpacking anything, and for
+# a loose file it is one stat call. Only when two candidates share a size do we
+# read bytes to compute a CRC. On a drive where almost every file is unique that
+# means almost no extra reading.
+# ---------------------------------------------------------------------------
+
+
+def crc32_of_file(path, chunk=1 << 20):
+    """CRC32 of a file on disk, read in chunks so a big PDF does not sit in RAM."""
+    value = 0
+    try:
+        with open(path, "rb") as fh:
+            while True:
+                block = fh.read(chunk)
+                if not block:
+                    break
+                value = zlib.crc32(block, value)
+    except OSError:
+        return None
+    return value & 0xFFFFFFFF
+
+
+def archive_pdf_entries(zip_path):
+    """
+    (member name, uncompressed size, CRC32) for each PDF in an archive.
+
+    All three come from the ZIP central directory, so this does not unpack or
+    even decompress anything.
+    """
+    entries = []
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for m in zf.infolist():
+                if (not m.is_dir() and m.filename.lower().endswith(".pdf")
+                        and _is_safe_member(m.filename)):
+                    entries.append((m.filename, m.file_size, m.CRC))
+    except Exception:
+        return []
+    return sorted(entries, key=lambda e: natural_key(e[0]))
+
+
+class DuplicateTracker:
+    """
+    Remembers which PDFs have been cropped in this run.
+
+    Sizes seen only once never need a CRC, so `prime` is given every candidate
+    size up front and `is_duplicate` only pays for the ambiguous ones.
+    """
+
+    def __init__(self, enabled=True):
+        self.enabled = enabled
+        self._ambiguous_sizes = set()
+        self._seen = {}          # (size, crc or None) -> description of the first
+        self.duplicates = []     # (description, description of the original)
+
+    def prime(self, sizes):
+        """Record which sizes appear more than once across everything found."""
+        counts = {}
+        for size in sizes:
+            counts[size] = counts.get(size, 0) + 1
+        self._ambiguous_sizes = {s for s, n in counts.items() if n > 1}
+
+    def _fingerprint(self, size, crc_getter):
+        if size not in self._ambiguous_sizes:
+            return (size, None)      # unique size: no need to read the bytes
+        return (size, crc_getter())
+
+    def check(self, description, size, crc_getter):
+        """
+        Returns the description of the earlier copy if this is a duplicate,
+        otherwise None and records it as the original.
+        """
+        if not self.enabled:
+            return None
+        key = self._fingerprint(size, crc_getter)
+        first = self._seen.get(key)
+        if first is not None:
+            self.duplicates.append((description, first))
+            return first
+        self._seen[key] = description
+        return None

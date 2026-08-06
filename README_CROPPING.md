@@ -49,9 +49,18 @@ where one ends and the other begins.
 - **Keep the crop** — the crop was right, move on. This is the usual answer.
 - **Use the full page instead** — the crop looks wrong. The page is rewritten
   uncropped, straight from the original PDF.
+- **Discard this page** — the page itself is no good: blank, a duplicate, a
+  scanning mishap. It is taken out of the set that gets uploaded.
+
+Discarding does not delete anything. The page is moved into a `_discarded`
+folder alongside the others, which is enough to keep it out of the upload, and
+the button turns into **Put this page back** if you change your mind. Choosing
+*Keep the crop* or *Use the full page instead* on a discarded page also brings
+it back.
 
 You can close the review window at any point. Anything you did not look at
-keeps its crop.
+keeps its crop. Every decision you make is written to the log file, so there is
+always a record of what was discarded and why.
 
 ## Sending pages for transcription
 
@@ -59,6 +68,23 @@ The checkbox **"Also send the cropped pages to the transcription API"** is off
 by default and is not remembered between runs. Cropping happens on this
 computer and costs nothing; uploading does, so it has to be asked for each
 time. Leave it off unless you specifically mean to upload.
+
+## The same volume appearing twice
+
+Drives usually have some overlap — a volume sitting loose *and* inside an
+archive, or the same volume in two archives. By default each file is cropped
+**once**: the first copy found is processed and later copies are skipped, with a
+line in the log saying which earlier file it matched.
+
+Matching is on the contents of the file, not its name, so a renamed copy is
+still recognised as the same volume. Two genuinely different volumes are never
+merged, even if their files happen to be the same size.
+
+Loose PDFs are looked at before archives, so when a volume exists both ways it
+is the loose copy that gets cropped.
+
+If you actually want every copy cropped separately, untick **Crop each file only
+once**.
 
 ## ZIP archives
 
@@ -82,6 +108,10 @@ other. Pages are named with the source PDF and a four-digit page number:
 They are saved in the same format the provider used, at the same quality. A
 page that needed no crop is copied across untouched, byte for byte.
 
+Two things in the output folder are not pages: `crop_log.txt`, and a
+`_discarded` folder if you discarded anything during review. Neither is ever
+uploaded.
+
 ## If something goes wrong
 
 **"No PDF files or ZIP archives found in that folder."** Either the folder is
@@ -92,6 +122,12 @@ again.
 are skipped, so it picks up roughly where it stopped. Untick **Skip archives I
 have already cropped** if you want everything redone from scratch.
 
+**Fewer pages than you expected, and the log says "already done, skipping".**
+That is the resume feature: those files were cropped into this same output
+folder on an earlier run. It is not the same thing as the duplicate check, which
+says "same file as ...". To crop everything again, either choose an empty output
+folder or untick **Skip archives I have already cropped**.
+
 **Windows warns about an unrecognised app.** This should no longer happen —
 the tool now runs as plain Python source under the signed Python interpreter,
 with no compiled program of its own. If you do see the warning, stop and tell
@@ -99,7 +135,11 @@ Daniel rather than clicking through it.
 
 **Anything else** — every run appends to `crop_log.txt` in the output folder.
 Send Daniel that file; it has the full detail, including anything that scrolled
-out of the window.
+out of the window and every review decision you made.
+
+Windows hides file extensions by default, so in Explorer this file shows up as
+just **crop_log** with a Notepad icon. That is the right file — double-click it
+to read it.
 
 ---
 

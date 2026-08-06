@@ -58,6 +58,57 @@ That is it. From here on, use [README_CROPPING.md](README_CROPPING.md), which
 describes the window itself. Wherever that document says
 "double-click VubeCropper.exe", double-click `VubeCropper.cmd` instead.
 
+## Updating to a newer version
+
+When Daniel tells you there is an update, this is the whole procedure. **You do
+not need to rebuild anything** — there is no compiled program any more, so
+replacing the files is the entire update. The launcher notices on its own if the
+libraries also need refreshing.
+
+Close the cropping window first, then pick whichever of these two matches how
+the folder got onto your computer.
+
+### If you have Git
+
+Press the Windows key, type `cmd`, press Enter, then:
+
+```bash
+cd C:\VubeCropper
+git pull
+```
+
+Double-click `VubeCropper.cmd` as usual. If the update also changed the
+libraries, the first launch afterwards shows the `[2/3] Installing...` line
+again for a minute or two; that is expected and only happens on that one launch.
+
+### If you downloaded a ZIP
+
+1. Download the new ZIP from the link Daniel sends.
+2. Unzip it somewhere temporary, like your Downloads folder.
+3. Copy everything out of it into `C:\VubeCropper`, choosing **Replace the
+   files in the destination** when Windows asks.
+4. Double-click `VubeCropper.cmd`.
+
+Do not delete the old folder first and do not delete the `.venv` folder inside
+it — leaving `.venv` in place is what makes the update quick instead of another
+ten-minute install.
+
+### Checking that it worked
+
+Nothing visible confirms an update on its own, so if you want to be sure, in
+`cmd`:
+
+```bash
+cd C:\VubeCropper
+git log -1 --format=%cd
+```
+
+That prints the date of the version you now have. Without Git, check the
+modification date on `vube_cropper.py` in Explorer.
+
+**Your cropped output and your settings are untouched by an update.** They live
+outside the project folder, and an update only replaces program files.
+
 ## Making it easier to launch
 
 Right-click `VubeCropper.cmd` → **Show more options** → **Send to** → **Desktop
@@ -99,6 +150,17 @@ modification time differs from the stamp in `.venv\.requirements-installed`.
 Editing `requirements.txt` therefore reinstalls on the next launch; touching
 other files does not.
 
+This is what makes updates a plain `git pull`: a checkout that changes
+`requirements.txt` updates its mtime, so the venv refreshes itself on the next
+launch, and a checkout that does not touch it launches straight into the window.
+Nothing needs rebuilding — the `.cmd` is a launcher, not a build artefact, and
+only needs re-copying if the `.cmd` itself changed.
+
+One caveat when telling the PI to update: `git pull` fails if he has somehow
+modified a tracked file locally. If that happens, `git stash` then `git pull` is
+the recovery, but it is worth asking what he changed first rather than
+discarding it blind.
+
 Passing arguments switches the launcher to console `python.exe` and forwards
 the exit code, so it works in scripts as well as by double-click:
 
@@ -108,7 +170,20 @@ VubeCropper.cmd --cli E:\vube\archives -o C:\cropped
 
 Remember that `--cli` has no review step — flagged pages are printed and keep
 their crops. The window is the only path that offers "use the full page
-instead".
+instead" or "discard this page".
+
+Two separate skip mechanisms exist and they are easy to confuse in a log:
+
+- **resume** (`skip_done`, `--redo` to defeat) skips work whose *output* is
+  already in the destination folder. Logged as "already done, skipping".
+- **dedupe** (`dedupe`, `--no-dedupe` to defeat) skips a *source* file whose
+  contents were already cropped earlier in the same run. Logged as "same file
+  as ...".
+
+Dedupe keys on (uncompressed size, CRC32). Size comes free from `stat` and from
+the ZIP central directory; the CRC is only computed when two candidates share a
+size, and for archive members it is read out of the directory rather than
+calculated, so a drive of uniquely-sized files costs no extra reads at all.
 
 ### Dependencies
 

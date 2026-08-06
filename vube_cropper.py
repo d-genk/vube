@@ -33,13 +33,20 @@ import numpy as np
 from PIL import Image
 
 from page_extract import (
-    count_pdfs_in_archive,
+    DISCARD_DIRNAME,
+    LOG_FILENAME,
+    DuplicateTracker,
+    append_log,
+    archive_pdf_entries,
+    crc32_of_file,
+    discard_page,
     find_archives,
     find_pdfs,
     flag_pages,
     process_archive,
     process_pdf,
     restore_full_page,
+    undiscard_page,
 )
 
 APP_NAME = "Vube Page Cropper"
@@ -54,14 +61,17 @@ STRETCH_LO, STRETCH_HI = 222, 255
 class CropRun:
     """One cropping job. Runs on a worker thread; reports through callbacks."""
 
-    def __init__(self, source, output_dir, recursive=True, skip_done=True):
+    def __init__(self, source, output_dir, recursive=True, skip_done=True,
+                 dedupe=True):
         self.source = source
         self.output_dir = output_dir
         self.recursive = recursive
         self.skip_done = skip_done
+        self.dedupe = dedupe
         self.results = []
         self.flagged = []
         self.skipped = []
+        self.duplicates = []
         self.error = None
         self._stop = threading.Event()
         self._logfile = None
@@ -76,9 +86,17 @@ class CropRun:
         pipeline kept, but derived from the output itself so it cannot drift
         out of sync with what is actually on disk.
         """
-        return os.path.isdir(out_dir) and any(
-            f.lower().endswith((".jpeg", ".jpg", ".png", ".tif", ".tiff"))
-            for f in os.listdir(out_dir))
+        if not os.path.isdir(out_dir):
+            return False
+        exts = (".jpeg", ".jpg", ".png", ".tif", ".tiff")
+        if any(f.lower().endswith(exts) for f in os.listdir(out_dir)):
+            return True
+        # Every page here may have been discarded during review. That still
+        # counts as done -- re-cropping would put them all back and quietly
+        # undo the decision.
+        holding = os.path.join(out_dir, DISCARD_DIRNAME)
+        return os.path.isdir(holding) and any(
+            f.lower().endswith(exts) for f in os.listdir(holding))
 
     def stop(self):
         self._stop.set()
@@ -97,7 +115,7 @@ class CropRun:
         # rather than re-describing it from memory.
         try:
             os.makedirs(self.output_dir, exist_ok=True)
-            self._logfile = open(os.path.join(self.output_dir, "crop_log.txt"),
+            self._logfile = open(os.path.join(self.output_dir, LOG_FILENAME),
                                  "a", encoding="utf-8")
             import datetime
             self._logfile.write(
@@ -135,14 +153,27 @@ class CropRun:
             # Weight the bar by PDFs, not by archives -- one archive may hold a
             # single volume or several hundred, and an archive-counted bar would
             # sit at 1/40 for ten minutes.
+            # Read every archive's directory once: it gives the PDF count for
+            # the progress bar and the sizes/CRCs the duplicate check needs,
+            # without unpacking anything.
+            archive_entries = {}
             archive_counts = {}
             for z in archives:
                 if self.stopped:
                     break
-                archive_counts[z] = count_pdfs_in_archive(z)
+                archive_entries[z] = archive_pdf_entries(z)
+                archive_counts[z] = len(archive_entries[z])
             total = len(pdfs) + sum(archive_counts.values())
             if archives:
                 log(f"  {total} PDF(s) in total to process.")
+
+            tracker = DuplicateTracker(enabled=self.dedupe)
+            if self.dedupe:
+                sizes = [os.path.getsize(p) for p in pdfs if os.path.exists(p)]
+                for entries in archive_entries.values():
+                    sizes.extend(size for _, size, _ in entries)
+                tracker.prime(sizes)
+
             done = [0]
 
             def page_tick(_result):
@@ -170,6 +201,14 @@ class CropRun:
                         glob.escape(out), glob.escape(stem) + "_0001.*")):
                     self.skipped.append(pdf)
                     log(f"  {os.path.basename(pdf)}: already done, skipping")
+                    continue
+
+                first = tracker.check(os.path.basename(pdf),
+                                      os.path.getsize(pdf),
+                                      lambda p=pdf: crc32_of_file(p))
+                if first is not None:
+                    self.duplicates.append((pdf, first))
+                    log(f"  {os.path.basename(pdf)}: same file as {first}, skipping")
                     continue
 
                 pages = process_pdf(pdf, output_dir=out,
@@ -200,11 +239,32 @@ class CropRun:
                     continue
 
                 log(f"  Unpacking {zname} ({archive_counts.get(z, 0)} PDF(s))...")
+
+                dup_here = []
+
+                def accept(member, size, crc, _z=zname, _dups=dup_here):
+                    # The CRC is already in the archive directory, so a
+                    # duplicate inside a ZIP is caught before it is unpacked.
+                    label = f"{_z}:{member}"
+                    first = tracker.check(label, size, lambda c=crc: c)
+                    if first is not None:
+                        _dups.append((label, first))
+                        return False
+                    return True
+
                 pages = process_archive(z, out, on_page=page_tick, on_pdf=pdf_tick,
-                                        should_stop=lambda: self.stopped)
+                                        should_stop=lambda: self.stopped,
+                                        accept_member=accept)
+                for label, first in dup_here:
+                    done[0] += 1
+                    self.duplicates.append((label, first))
+                    log(f"    {label.split(':', 1)[1]}: same file as {first}, skipping")
                 self.results.extend(pages)
-                log(f"  {zname}: {len(pages)} page(s), "
-                    f"{sum(1 for p in pages if p.box)} cropped")
+                if not pages and not dup_here:
+                    log(f"  {zname}: no PDFs inside")
+                else:
+                    log(f"  {zname}: {len(pages)} page(s), "
+                        f"{sum(1 for p in pages if p.box)} cropped")
 
             if self.stopped:
                 log("Stopped.")
@@ -217,7 +277,9 @@ class CropRun:
             log(f"Done. {len(self.results)} page(s) written to {self.output_dir}")
             log(f"  {cropped} cropped, {len(self.results) - cropped} left unchanged")
             if self.skipped:
-                log(f"  {len(self.skipped)} archive(s) skipped as already done")
+                log(f"  {len(self.skipped)} item(s) skipped as already done")
+            if self.duplicates:
+                log(f"  {len(self.duplicates)} duplicate file(s) skipped")
             if self.flagged:
                 log(f"  {len(self.flagged)} page(s) flagged for review")
             return True
@@ -337,6 +399,7 @@ def launch_gui():
     recursive_var = tk.BooleanVar(value=settings.get("recursive", True))
     review_var = tk.BooleanVar(value=settings.get("review", True))
     skip_var = tk.BooleanVar(value=settings.get("skip_done", True))
+    dedupe_var = tk.BooleanVar(value=settings.get("dedupe", True))
     submit_var = tk.BooleanVar(value=False)   # never remembered; always opt in
 
     state = {"run": None, "thread": None}
@@ -395,26 +458,30 @@ def launch_gui():
                               "(lets an interrupted run resume)",
                     variable=skip_var).grid(row=10, column=0, columnspan=3,
                                             sticky="w", padx=12, pady=2)
+    ttk.Checkbutton(frm, text="Crop each file only once, even if the same PDF "
+                              "appears twice on the drive",
+                    variable=dedupe_var).grid(row=12, column=0, columnspan=3,
+                                              sticky="w", padx=12, pady=2)
     ttk.Checkbutton(frm, text="Also send the cropped pages to the transcription "
                               "API (uploads data)",
                     variable=submit_var).grid(row=11, column=0, columnspan=3,
                                               sticky="w", padx=12, pady=2)
 
-    ttk.Separator(frm).grid(row=12, column=0, columnspan=3, sticky="ew", pady=10)
+    ttk.Separator(frm).grid(row=13, column=0, columnspan=3, sticky="ew", pady=10)
 
     bar = ttk.Progressbar(frm, mode="determinate")
-    bar.grid(row=13, column=0, columnspan=3, sticky="ew", padx=12)
+    bar.grid(row=14, column=0, columnspan=3, sticky="ew", padx=12)
     status = ttk.Label(frm, text="Ready.", foreground="#333")
-    status.grid(row=14, column=0, columnspan=3, sticky="w", padx=12, pady=(4, 0))
+    status.grid(row=15, column=0, columnspan=3, sticky="w", padx=12, pady=(4, 0))
 
     logbox = tk.Text(frm, height=11, wrap="none", font=("Consolas", 9),
                      background="#fbfbfb")
-    logbox.grid(row=15, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
-    frm.rowconfigure(15, weight=1)
+    logbox.grid(row=16, column=0, columnspan=3, sticky="nsew", padx=12, pady=8)
+    frm.rowconfigure(16, weight=1)
     logbox.configure(state="disabled")
 
     btns = ttk.Frame(frm)
-    btns.grid(row=16, column=0, columnspan=3, sticky="ew", padx=12)
+    btns.grid(row=17, column=0, columnspan=3, sticky="ew", padx=12)
     start_btn = ttk.Button(btns, text="Start")
     start_btn.pack(side="left")
     stop_btn = ttk.Button(btns, text="Stop", state="disabled")
@@ -439,7 +506,8 @@ def launch_gui():
                 json.dump({"source": source_var.get(), "output": output_var.get(),
                            "recursive": recursive_var.get(),
                            "review": review_var.get(),
-                           "skip_done": skip_var.get()}, fh)
+                           "skip_done": skip_var.get(),
+                           "dedupe": dedupe_var.get()}, fh)
         except Exception:
             pass
 
@@ -458,36 +526,78 @@ def launch_gui():
         ttk.Label(win, foreground="#555", wraplength=1020, justify="left",
                   text="Left: the whole scan, with the crop outlined in green. "
                        "Right: what will be sent. Both are brightness-boosted so "
-                       "the provider's white mount is visible.").pack(
+                       "the provider's white mount is visible. Discarding moves "
+                       "a page into a _discarded folder rather than deleting it, "
+                       "so you can always put it back.").pack(
                            anchor="w", padx=14, pady=(6, 4))
 
         canvas = ttk.Label(win)
         canvas.pack(pady=6)
         keeper = {"img": None}
 
+        def note(msg):
+            """Record a review decision on screen and in the run log."""
+            append(msg)
+            append_log(output_var.get().strip() or ".", msg)
+
         def show():
             r = flagged[idx["i"]]
             head.config(text=f"Page {idx['i'] + 1} of {len(flagged)}   --   {r.name}")
             why.config(text="Flagged because: " + "; ".join(r.flags))
-            thumb = review_thumbnail(r)
-            if thumb:
-                keeper["img"] = ImageTk.PhotoImage(thumb)
-                canvas.config(image=keeper["img"])
+
+            if r.discarded:
+                canvas.config(image="", text="\n(discarded -- this page will not "
+                                             "be uploaded)\n")
+                keeper["img"] = None
             else:
-                canvas.config(image="", text="(could not render preview)")
-            state_lbl.config(
-                text="Currently: cropped" if r.box else "Currently: full page, not cropped")
+                thumb = review_thumbnail(r)
+                if thumb:
+                    keeper["img"] = ImageTk.PhotoImage(thumb)
+                    canvas.config(image=keeper["img"], text="")
+                else:
+                    canvas.config(image="", text="(could not render preview)")
+
+            if r.discarded:
+                state_lbl.config(text="Currently: DISCARDED, moved to the "
+                                      "_discarded folder", foreground="#a33")
+                discard_btn.config(text="Put this page back")
+            else:
+                state_lbl.config(
+                    text=("Currently: cropped" if r.box
+                          else "Currently: full page, not cropped"),
+                    foreground="#333")
+                discard_btn.config(text="Discard this page")
 
         def step(delta):
             idx["i"] = max(0, min(len(flagged) - 1, idx["i"] + delta))
             show()
 
+        def keep_crop():
+            # Choosing a crop for a discarded page implicitly brings it back.
+            r = flagged[idx["i"]]
+            if r.discarded and undiscard_page(r):
+                note(f"Restored from discarded: {r.name}")
+                show()
+                return
+            step(1)
+
         def use_full():
             r = flagged[idx["i"]]
-            if not r.box:
+            if not r.box and not r.discarded:
                 return
             if restore_full_page(r):
-                append(f"Reverted to full page: {r.name}")
+                note(f"Reverted to full page: {r.name}")
+                show()
+
+        def toggle_discard():
+            r = flagged[idx["i"]]
+            if r.discarded:
+                if undiscard_page(r):
+                    note(f"Restored from discarded: {r.name}")
+                    show()
+                return
+            if discard_page(r):
+                note(f"Discarded: {r.name}")
                 show()
 
         state_lbl = ttk.Label(win, foreground="#333")
@@ -496,9 +606,11 @@ def launch_gui():
         row = ttk.Frame(win)
         row.pack(pady=8)
         ttk.Button(row, text="< Previous", command=lambda: step(-1)).pack(side="left", padx=4)
-        ttk.Button(row, text="Keep the crop", command=lambda: step(1)).pack(side="left", padx=4)
+        ttk.Button(row, text="Keep the crop", command=keep_crop).pack(side="left", padx=4)
         ttk.Button(row, text="Use the full page instead",
                    command=use_full).pack(side="left", padx=4)
+        discard_btn = ttk.Button(row, text="Discard this page", command=toggle_discard)
+        discard_btn.pack(side="left", padx=4)
         ttk.Button(row, text="Next >", command=lambda: step(1)).pack(side="left", padx=4)
         ttk.Button(row, text="Close", command=win.destroy).pack(side="left", padx=18)
         show()
@@ -586,7 +698,7 @@ def launch_gui():
         status.config(text="Working...")
 
         run = CropRun(src, out, recursive=recursive_var.get(),
-                      skip_done=skip_var.get())
+                      skip_done=skip_var.get(), dedupe=dedupe_var.get())
         state["run"] = run
 
         def worker():
@@ -623,7 +735,7 @@ def launch_gui():
 def run_cli(args):
     out = args.output or os.path.join(os.getcwd(), "cropped_pages")
     run = CropRun(args.source, out, recursive=not args.no_recursive,
-                  skip_done=not args.redo)
+                  skip_done=not args.redo, dedupe=not args.no_dedupe)
     ok = run.run(on_log=print,
                  on_progress=lambda d, t, l: None)
     if not ok:
@@ -646,6 +758,8 @@ def main():
                     help="do not search sub-folders (CLI mode)")
     ap.add_argument("--redo", action="store_true",
                     help="re-crop archives that already have output (CLI mode)")
+    ap.add_argument("--no-dedupe", action="store_true",
+                    help="crop every copy of a PDF, not just the first (CLI mode)")
     args = ap.parse_args()
 
     if args.source:
