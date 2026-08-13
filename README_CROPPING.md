@@ -38,6 +38,15 @@ checks:
 - the saved file is much smaller than the others in the batch
 - no crop was found, although most pages in the batch were cropped
 
+**Reviewing is optional, and the crops are already finished.** Every cropped
+page is written to disk before the review window ever opens, in exactly the
+state it would be uploaded in. The window is there so you can *override* a
+handful of decisions — it is not a queue of work that has to be cleared.
+
+If you are happy with the crops, press **No** at the prompt, or **Keep all
+remaining crops and close** inside the window. Nothing further happens and every
+crop stands. On a large job this is the normal answer.
+
 **Nothing is ever deleted.** The tool shows you each flagged page and asks.
 
 The review window shows two pictures side by side. On the left is the whole
@@ -51,6 +60,9 @@ where one ends and the other begins.
   uncropped, straight from the original PDF.
 - **Discard this page** — the page itself is no good: blank, a duplicate, a
   scanning mishap. It is taken out of the set that gets uploaded.
+- **Keep all remaining crops and close** — you have seen enough. Every page you
+  have not looked at keeps its crop, which is what would have happened anyway;
+  this just says so in the log and closes the window.
 
 Discarding does not delete anything. The page is moved into a `_discarded`
 folder alongside the others, which is enough to keep it out of the upload, and
@@ -58,9 +70,13 @@ the button turns into **Put this page back** if you change your mind. Choosing
 *Keep the crop* or *Use the full page instead* on a discarded page also brings
 it back.
 
-You can close the review window at any point. Anything you did not look at
-keeps its crop. Every decision you make is written to the log file, so there is
-always a record of what was discarded and why.
+You can close the review window at any point, with the X if you like. Anything
+you did not look at keeps its crop. Every decision you make is written to the
+log file, so there is always a record of what was discarded and why.
+
+The log also lists every flagged page and why it was flagged. On a big job that
+is far more practical than clicking through them: open `crop_log.txt`, read the
+reasons, and go look at a few in the output folder if any of them sound wrong.
 
 ## Sending pages for transcription
 

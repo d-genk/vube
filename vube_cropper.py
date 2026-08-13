@@ -38,6 +38,7 @@ from page_extract import (
     DuplicateTracker,
     append_log,
     archive_pdf_entries,
+    batch_summary,
     crc32_of_file,
     discard_page,
     find_archives,
@@ -280,8 +281,12 @@ class CropRun:
                 log(f"  {len(self.skipped)} item(s) skipped as already done")
             if self.duplicates:
                 log(f"  {len(self.duplicates)} duplicate file(s) skipped")
+            log("  " + batch_summary(self.results))
             if self.flagged:
-                log(f"  {len(self.flagged)} page(s) flagged for review")
+                log(f"  {len(self.flagged)} page(s) differ from the rest and are "
+                    f"flagged for optional review:")
+                for r in self.flagged:
+                    log(f"      {r.name}: {'; '.join(r.flags)}")
             return True
         except Exception:
             self.error = traceback.format_exc()
@@ -540,6 +545,16 @@ def launch_gui():
             append(msg)
             append_log(output_var.get().strip() or ".", msg)
 
+        def keep_all_remaining():
+            # Keeping a crop is not an action -- the cropped file is already on
+            # disk in its final state, and this window only ever inspects it.
+            # So "keep all" is genuinely just closing, and the only thing worth
+            # doing is writing down that the decision was made deliberately.
+            remaining = sum(1 for r in flagged[idx["i"]:] if not r.discarded)
+            note(f"Kept the crop on the remaining {remaining} flagged page(s) "
+                 f"without individual review.")
+            win.destroy()
+
         def show():
             r = flagged[idx["i"]]
             head.config(text=f"Page {idx['i'] + 1} of {len(flagged)}   --   {r.name}")
@@ -612,7 +627,12 @@ def launch_gui():
         discard_btn = ttk.Button(row, text="Discard this page", command=toggle_discard)
         discard_btn.pack(side="left", padx=4)
         ttk.Button(row, text="Next >", command=lambda: step(1)).pack(side="left", padx=4)
-        ttk.Button(row, text="Close", command=win.destroy).pack(side="left", padx=18)
+
+        row2 = ttk.Frame(win)
+        row2.pack(pady=(0, 10))
+        ttk.Button(row2, text="Keep all remaining crops and close",
+                   command=keep_all_remaining).pack(side="left", padx=4)
+        ttk.Button(row2, text="Close", command=win.destroy).pack(side="left", padx=18)
         show()
 
     # -- run control --------------------------------------------------------
@@ -630,16 +650,26 @@ def launch_gui():
         if run and run.flagged and review_var.get():
             review_btn.config(state="normal",
                               text=f"Review {len(run.flagged)} flagged page(s)")
+            # The crops are already written and are already what would be
+            # uploaded. Reviewing is an opportunity to override a few of them,
+            # not a step that has to be completed, so the dialog says so
+            # outright -- at tens of thousands of pages the wrong impression
+            # here costs hours.
             if messagebox.askyesno(
                     APP_NAME,
-                    f"{len(run.results)} page(s) cropped.\n\n"
-                    f"{len(run.flagged)} of them look unusual. Nothing has been "
-                    f"deleted -- would you like to look at them now?"):
+                    f"{batch_summary(run.results)}\n\n"
+                    f"All of them are saved and ready to use as they are.\n\n"
+                    f"{len(run.flagged)} page(s) differ enough from the rest that "
+                    f"you may want to look. This is optional -- choosing No keeps "
+                    f"every crop exactly as it is, and you can reopen the list "
+                    f"from the main window.\n\n"
+                    f"Look at the {len(run.flagged)} flagged page(s) now?"):
                 open_review(run.flagged)
         else:
-            messagebox.showinfo(APP_NAME,
-                                f"{len(run.results) if run else 0} page(s) written to\n"
-                                f"{output_var.get()}")
+            messagebox.showinfo(
+                APP_NAME,
+                f"{batch_summary(run.results) if run else ''}\n\n"
+                f"Written to {output_var.get()}")
         if submit_var.get() and run and run.results:
             messagebox.showinfo(
                 APP_NAME,

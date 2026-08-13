@@ -172,6 +172,17 @@ Remember that `--cli` has no review step — flagged pages are printed and keep
 their crops. The window is the only path that offers "use the full page
 instead" or "discard this page".
 
+Review is an inspector, not a work queue. `process_pdf` writes each page in its
+final state during the run; `flag_pages` only annotates the in-memory results
+afterwards. "Keep the crop" calls `step(1)` and touches nothing on disk, so
+abandoning a review of 8,000 pages costs exactly nothing — which is why "keep
+all" could be added as a pure UI affordance rather than a batch operation.
+
+Flag thresholds are relative to the batch (`KEEP_DROP`), with an absolute floor
+(`KEEP_FLOOR`) for crops that are alarming no matter what their neighbours did.
+An absolute-only rule does not survive contact with collections whose mounts are
+a different width: at 15% it flagged either nothing or every single page.
+
 Two separate skip mechanisms exist and they are easy to confuse in a log:
 
 - **resume** (`skip_done`, `--redo` to defeat) skips work whose *output* is

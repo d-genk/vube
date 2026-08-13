@@ -245,11 +245,43 @@ class PageResult:
         return (l, t, self.width - r, self.height - b)
 
 
-# A crop this aggressive is legitimate for a wide mount but is also what a
-# mis-crop looks like, so it earns a human glance rather than a deletion.
-AGGRESSIVE_KEEP = 0.85
+# How much a page has to differ from the rest of its batch before it is worth a
+# human glance. These are relative on purpose: how wide the provider's mount is
+# varies from collection to collection, so an absolute "cropped more than 15%"
+# rule flags either nothing or literally every page depending on the source.
+# What actually indicates a problem is a page cropped much harder than its
+# neighbours, since they all came off the same scanner in the same session.
+KEEP_DROP = 0.15          # flag when a page keeps this much less than the median
+KEEP_FLOOR = 0.50         # ...or when it keeps less than this, whatever the batch
 SIZE_OUTLIER_RATIO = 0.15
 NO_CROP_MINORITY = 0.70
+
+
+def _median(values):
+    ordered = sorted(values)
+    if not ordered:
+        return 0
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def batch_summary(results):
+    """
+    One-line description of what the run did, for the finished message.
+
+    Worth showing even when nothing is flagged: if the typical crop is wildly
+    wrong for a collection, that shows up here as a number the PI can sanity
+    check at a glance, which per-page flags no longer do now that they are
+    relative.
+    """
+    cropped = [r for r in results if r.box]
+    if not cropped:
+        return "No page needed cropping."
+    typical = 1 - _median([r.keep_fraction for r in cropped])
+    return (f"{len(cropped)} of {len(results)} page(s) cropped; "
+            f"typically {typical:.0%} of each image removed.")
 
 
 def flag_pages(results):
@@ -264,18 +296,22 @@ def flag_pages(results):
     if not results:
         return []
 
-    sizes = sorted(r.size_bytes for r in results)
-    median = sizes[len(sizes) // 2] if sizes else 0
-    cropped = sum(1 for r in results if r.box)
-    mostly_cropped = bool(results) and (cropped / len(results)) >= NO_CROP_MINORITY
+    median_size = _median([r.size_bytes for r in results])
+    cropped = [r for r in results if r.box]
+    mostly_cropped = bool(results) and (len(cropped) / len(results)) >= NO_CROP_MINORITY
+    median_keep = _median([r.keep_fraction for r in cropped]) if cropped else 1.0
 
     for r in results:
         r.flags = []
-        if r.box and r.keep_fraction < AGGRESSIVE_KEEP:
-            r.flags.append(f"crop removed {(1 - r.keep_fraction):.0%} of the image")
-        if median and r.size_bytes < SIZE_OUTLIER_RATIO * median:
+        if r.box and (r.keep_fraction < median_keep - KEEP_DROP
+                      or r.keep_fraction < KEEP_FLOOR):
+            r.flags.append(
+                f"crop removed {(1 - r.keep_fraction):.0%} of the image, against "
+                f"{(1 - median_keep):.0%} for the rest of this batch")
+        if median_size and r.size_bytes < SIZE_OUTLIER_RATIO * median_size:
             r.flags.append(f"file is much smaller than the others "
-                           f"({r.size_bytes / 1024:.0f} KB vs {median / 1024:.0f} KB typical)")
+                           f"({r.size_bytes / 1024:.0f} KB vs "
+                           f"{median_size / 1024:.0f} KB typical)")
         if not r.box and mostly_cropped:
             r.flags.append("no crop found, though most pages in this batch were cropped")
 
