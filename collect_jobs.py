@@ -9,7 +9,7 @@ The ledger (see job_ledger.py) is both the pending queue and the permanent recor
 record enters as SUBMITTED and stays in the file for good, its status advancing as the
 job progresses. Nothing is ever deleted, so the ledger remains the provenance record of
 which source keys went into which job -- which matters here, because these jobs run with
-delete_data set and the source copies are gone after processing.
+delete_data set and the pipeline's copies are gone after processing.
 
     SUBMITTED   -> COLLECTED    artifacts downloaded to --out-dir
     SUBMITTED   -> JOB_FAILED   the API reported the job as failed
@@ -286,7 +286,7 @@ def main():
         print("[!] Jobs the API reports as failed (recorded JOB_FAILED):")
         for record, job_error in failed_jobs:
             print(f"    {record.get('job_title')}  {record['job_id']}  -- {job_error}")
-        print("[!] Their issues stay claimed. Re-run a submitter with --retry-failed to")
+        print("[!] Their volumes stay claimed. Re-run a submitter with --retry-failed to")
         print("[!] make them eligible again.")
     if errored:
         print("[!] Jobs left as SUBMITTED after an error (will retry next run):")

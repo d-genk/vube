@@ -74,7 +74,7 @@ def main():
         print("=" * 78)
         print(f"job_id     {job_id}")
         print(f"title      {local.get('job_title', '(not in ledger)')}")
-        print(f"issue      {local.get('issue', '-')}")
+        print(f"volume     {local.get('volume', '-')}")
         print(f"ledger     {local.get('status', '-')}  submitted {local.get('submitted_at', '-')}"
               f"  pages {local.get('page_count', '-')}")
         print("-" * 78)

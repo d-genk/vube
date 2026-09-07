@@ -2,27 +2,24 @@
 """
 job_ledger.py
 
-The single record of every issue this pipeline has touched.
+The single record of every volume this pipeline has touched.
 
-One JSON Lines file (default: submitted_jobs.jsonl) holds one record per issue. The
-record is created at submission and updated in place as the job moves through its
-lifecycle, so the ledger answers both questions the pipeline asks:
+One JSON Lines file (default: submitted_jobs.jsonl) holds one record per volume -- a
+volume being one [prefix]/YYYY_X_PPPP folder, submitted as a single job. The record is
+created at submission and updated in place as the job moves through its lifecycle, so
+the ledger answers both questions the pipeline asks:
 
-    "which issues have already been dealt with?"   -> every record in the file
+    "which volumes have already been dealt with?"  -> every record in the file
     "which jobs still need collecting?"            -> records with status SUBMITTED
-
-This replaces the earlier split between processed_issues.txt and a separate manifest.
-The text file held a strict subset of what the ledger already records, and keeping the
-two in sync was a failure mode with no upside.
 
 ## Statuses
 
     SUBMITTED       job accepted by the API, artifacts not yet downloaded
     COLLECTED       artifacts downloaded; terminal success
     JOB_FAILED      the API reported the job as failed; terminal, will never complete
-    SUBMIT_FAILED   submission itself failed; the issue never reached the API
+    SUBMIT_FAILED   submission itself failed; the volume never reached the API
 
-An issue is eligible for submission when it has no record, or its only records are
+A volume is eligible for submission when it has no record, or its only records are
 SUBMIT_FAILED -- nothing reached the API, so nothing was billed. JOB_FAILED is not
 retried by default (the job consumed credits and the failure may well repeat), but
 --retry-failed opts into it.
@@ -34,14 +31,6 @@ via a temp file and os.replace, re-reading it first so that concurrently appende
 survive and unparseable lines pass through untouched. That makes an interrupted run safe,
 but it is not a substitute for locking -- do not run two scripts against one ledger
 simultaneously.
-
-## Migration
-
-Ledger records are keyed on `issue`, and the default filename is unchanged from the
-earlier manifest, so an existing submitted_jobs.jsonl is already a valid ledger. A
-legacy processed_issues.txt, if present, is still read as an additional exclusion source
-so issues completed under the old scheme are never re-submitted. It is never written to,
-and can be deleted once you are satisfied the ledger covers everything.
 """
 
 import os
@@ -50,7 +39,6 @@ import datetime
 import tempfile
 
 DEFAULT_LEDGER = "submitted_jobs.jsonl"
-LEGACY_PROCESSED_FILE = "processed_issues.txt"
 
 RECORD_VERSION = 1
 
@@ -59,8 +47,8 @@ STATUS_COLLECTED = "COLLECTED"
 STATUS_JOB_FAILED = "JOB_FAILED"
 STATUS_SUBMIT_FAILED = "SUBMIT_FAILED"
 
-# Statuses that make an issue ineligible for resubmission. SUBMIT_FAILED is absent by
-# design: nothing reached the API, so the issue is free to try again.
+# Statuses that make a volume ineligible for resubmission. SUBMIT_FAILED is absent by
+# design: nothing reached the API, so the volume is free to try again.
 CLAIMED_STATUSES = {STATUS_SUBMITTED, STATUS_COLLECTED, STATUS_JOB_FAILED}
 
 # Dropped from CLAIMED_STATUSES when --retry-failed is given.
@@ -92,13 +80,13 @@ def read_ledger(path):
     return records, malformed
 
 
-def claimed_issues(records, retry_failed=False):
-    """Issues that must not be submitted again."""
+def claimed_volumes(records, retry_failed=False):
+    """Volumes that must not be submitted again."""
     blocking = set(CLAIMED_STATUSES)
     if retry_failed:
         blocking -= RETRYABLE_ON_REQUEST
 
-    return {r["issue"] for r in records if r.get("issue") and r.get("status") in blocking}
+    return {r["volume"] for r in records if r.get("volume") and r.get("status") in blocking}
 
 
 def pending_jobs(records):
@@ -106,33 +94,14 @@ def pending_jobs(records):
     return [r for r in records if r.get("status") == STATUS_SUBMITTED and r.get("job_id")]
 
 
-def legacy_processed_issues(path=LEGACY_PROCESSED_FILE):
-    """Issues recorded by the superseded processed_issues.txt, read only.
-
-    Kept so that issues completed before the ledger existed stay excluded. Nothing
-    writes to this file any more.
-    """
-    issues = set()
-    if not path or not os.path.exists(path):
-        return issues
-
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            val = line.strip()
-            if val and not val.startswith("#"):
-                issues.add(val)
-
-    return issues
-
-
-def build_record(issue, job_title, keys, status, job_id=None, error=None, **extra):
+def build_record(volume, job_title, keys, status, job_id=None, error=None, **extra):
     """Create a ledger record. `extra` carries submission context (api_url, bucket, model)."""
     record = {
         "record_version": RECORD_VERSION,
         "status": status,
         "job_id": job_id,
         "job_title": job_title,
-        "issue": issue,
+        "volume": volume,
         "submitted_at": utc_now(),
         "page_count": len(keys),
         "keys": list(keys),
@@ -209,18 +178,15 @@ def update_records(path, updates):
     return updated
 
 
-def load_exclusions(ledger_path, legacy_path=LEGACY_PROCESSED_FILE, retry_failed=False, verbose=True):
-    """Every issue that should be kept out of a new submission run."""
+def load_exclusions(ledger_path, retry_failed=False, verbose=True):
+    """Every volume that should be kept out of a new submission run."""
     records, malformed = read_ledger(ledger_path)
     if malformed and verbose:
         print(f"[!] Warning: skipped {malformed} malformed line(s) in '{ledger_path}'.")
 
-    claimed = claimed_issues(records, retry_failed=retry_failed)
-    legacy = legacy_processed_issues(legacy_path)
+    claimed = claimed_volumes(records, retry_failed=retry_failed)
 
     if verbose:
-        print(f"[*] Ledger '{ledger_path}' holds {len(records)} record(s); {len(claimed)} issue(s) claimed.")
-        if legacy:
-            print(f"[*] Legacy '{legacy_path}' contributes {len(legacy - claimed)} additional issue(s).")
+        print(f"[*] Ledger '{ledger_path}' holds {len(records)} record(s); {len(claimed)} volume(s) claimed.")
 
-    return records, claimed | legacy
+    return records, claimed
