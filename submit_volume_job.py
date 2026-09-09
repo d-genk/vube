@@ -163,8 +163,8 @@ def add_job_arguments(parser):
     parser.add_argument("--password", help="Archivault account password (prompted if omitted)")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="Base Archivault API URL")
 
-    parser.add_argument("--country", default="GB", help="Country of origin (default: GB)")
-    parser.add_argument("--state", default="", help="State/Province")
+    parser.add_argument("--country", default="US", help="Country of origin (default: GB)")
+    parser.add_argument("--state", default="TN", help="State/Province")
     parser.add_argument("--description", default="", help="Job description")
     parser.add_argument("--writing-style", default="printed", help="Writing style (default: printed)")
     parser.add_argument("--language", default="english", help="Language (default: english)")
