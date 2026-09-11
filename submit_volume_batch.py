@@ -26,7 +26,7 @@ Example:
     python submit_volume_batch.py         --source-bucket my-source-bucket         --key-prefix collections/periodicals         --profile vube-source         --email you@example.org         --count 25
 """
 
-# python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix Daniel --profile vube --email daniel.genkins@gmail.com --count 50
+# python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix Daniel --profile vube --email daniel.genkins@gmail.com --count 30
 
 import sys
 import time
