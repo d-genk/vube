@@ -28,6 +28,8 @@ Example:
 
 # python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix Daniel --profile vube --email daniel.genkins@gmail.com --count 30
 
+# python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix BP2/ --profile vube --folders-file "batches_02.csv" --dedup-index dedup_index.json --count 5 --email daniel.genkins@gmail.com --ledger submitted_jobs_bp2.jsonl
+
 import sys
 import time
 import random
