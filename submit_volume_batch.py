@@ -44,6 +44,7 @@ try:
         print_status,
     )
     import job_ledger
+    import dedup_index
 except ImportError as e:
     print(f"[!] Error: Could not import a required local module ({e}).")
     print("[!] Ensure submit_job.py, submit_volume_job.py and job_ledger.py are present.")
@@ -78,7 +79,11 @@ def main():
         random.seed(args.seed)
 
     # 1. Index the bucket, then subtract everything already spoken for.
-    volumes, _ = build_volume_index(args.source_bucket, args.key_prefix, args.profile)
+    folders = dedup_index.load_folder_list(args.folders_file)
+    dedup_map = dedup_index.load_index(args.dedup_index)
+    if dedup_map:
+        print_status(f"Dedup index '{args.dedup_index}' covers {len(dedup_map)} duplicate page(s).")
+    volumes, _ = build_volume_index(args.source_bucket, args.key_prefix, args.profile, dedup_map, folders)
     if not volumes:
         print(f"[!] No page images found under prefix '{args.key_prefix}' in bucket '{args.source_bucket}'.")
         sys.exit(1)

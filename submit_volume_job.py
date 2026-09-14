@@ -57,9 +57,10 @@ try:
         MODEL_OPTIONS,
     )
     import job_ledger
+    import dedup_index
 except ImportError as e:
     print(f"[!] Error: Could not import a required local module ({e}).")
-    print("[!] Ensure submit_job.py and job_ledger.py are in the current directory.")
+    print("[!] Ensure submit_job.py, job_ledger.py and dedup_index.py are present.")
     sys.exit(1)
 
 DEFAULT_TRANSCRIPTION_MODEL = "gemini-3.1-pro-preview"
@@ -77,11 +78,20 @@ PAGE_FILENAME_RE = re.compile(
 VOLUME_DIR_RE = re.compile(r"^(?P<year>\d{4})_(?P<vol>[^_]+)_(?P<pub>\d+)$")
 
 
-def build_volume_index(bucket, key_prefix, profile=None):
+def build_volume_index(bucket, key_prefix, profile=None, dedup_map=None, folders=None):
     """List the bucket and group page keys by volume.
 
     Returns (volumes, skipped) where volumes maps '[prefix]/YYYY_X_PPPP' -> the sorted
     list of every page key in that folder, and skipped counts what was left out and why.
+
+    `dedup_map` (key -> representative key, from dedup_index.load_index) drops duplicate
+    pages before submission. Only non-representative members are dropped, so every
+    cluster still contributes exactly one image to exactly one job.
+
+    `folders` restricts the run to named volume folders, each listed under its own
+    prefix. Without it a shared prefix like BP2/ -- which holds millions of objects
+    spanning many requests -- would be scanned whole, and volumes nobody asked for would
+    become eligible for submission.
 
     Skips are categorised and reported rather than summed into one number: a pattern that
     quietly stops matching part of the collection is otherwise invisible, which is exactly
@@ -94,10 +104,17 @@ def build_volume_index(bucket, key_prefix, profile=None):
     skipped = Counter()
     total = 0
 
-    print_status(f"Listing s3://{bucket}/{key_prefix} ...")
     paginator = s3.get_paginator("list_objects_v2")
+    if folders:
+        prefixes = [f"{key_prefix.rstrip('/')}/{name}/" for name in sorted(folders)]
+        print_status(f"Listing {len(prefixes)} scoped folder(s) under s3://{bucket}/{key_prefix} ...")
+    else:
+        prefixes = [key_prefix]
+        print_status(f"Listing s3://{bucket}/{key_prefix} (unscoped) ...")
+
     try:
-        for page in paginator.paginate(Bucket=bucket, Prefix=key_prefix):
+      for prefix in prefixes:
+        for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
             for obj in page.get("Contents", []):
                 key = obj["Key"]
                 total += 1
@@ -121,6 +138,10 @@ def build_volume_index(bucket, key_prefix, profile=None):
                 # silently filing it under the wrong volume.
                 if page_match.group("pub") != dir_match.group("pub"):
                     skipped["publication id disagrees with folder"] += 1
+                    continue
+
+                if dedup_map and dedup_map.get(key, key) != key:
+                    skipped["duplicate of another page (dedup index)"] += 1
                     continue
 
                 volumes.setdefault(head, []).append(key)
@@ -158,6 +179,12 @@ def add_job_arguments(parser):
                         help=f"JSON Lines ledger of every volume touched (default: {job_ledger.DEFAULT_LEDGER})")
     parser.add_argument("--retry-failed", action="store_true",
                         help="Treat volumes whose job failed as eligible again")
+    parser.add_argument("--folders-file", default=None,
+                        help="CSV or newline list of volume folder names to restrict the run to; "
+                             "without it the whole key prefix is eligible")
+    parser.add_argument("--dedup-index", default=None,
+                        help="Duplicate manifest from dedup_index.py; duplicate pages are "
+                             "not submitted (their text re-attaches via the manifest)")
 
     parser.add_argument("--email", help="Archivault account email")
     parser.add_argument("--password", help="Archivault account password (prompted if omitted)")
@@ -220,6 +247,8 @@ def ledger_record(args, volume, keys, job_id, status, error=None):
         transcription_model=args.transcription_model,
         batch_mode=True,
         delete_data=True,
+        # Which index shaped this key list, so the submitted set stays interpretable.
+        dedup_index=getattr(args, "dedup_index", None),
     )
 
 
@@ -299,7 +328,11 @@ def main():
         parser.error("--transcription-instructions must be at most 500 characters.")
 
     # 1. Index the bucket and subtract everything already spoken for.
-    volumes, _ = build_volume_index(args.source_bucket, args.key_prefix, args.profile)
+    folders = dedup_index.load_folder_list(args.folders_file)
+    dedup_map = dedup_index.load_index(args.dedup_index)
+    if dedup_map:
+        print_status(f"Dedup index '{args.dedup_index}' covers {len(dedup_map)} duplicate page(s).")
+    volumes, _ = build_volume_index(args.source_bucket, args.key_prefix, args.profile, dedup_map, folders)
     if not volumes:
         print(f"[!] No page images found under prefix '{args.key_prefix}' in bucket '{args.source_bucket}'.")
         sys.exit(1)
