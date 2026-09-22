@@ -38,7 +38,7 @@ import json
 import datetime
 import tempfile
 
-DEFAULT_LEDGER = "submitted_jobs.jsonl"
+DEFAULT_LEDGER = "submitted_jobs_bp2.jsonl"
 
 RECORD_VERSION = 1
 
