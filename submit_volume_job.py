@@ -64,7 +64,7 @@ except ImportError as e:
     sys.exit(1)
 
 DEFAULT_TRANSCRIPTION_MODEL = "gemini-3.1-pro-preview"
-DEFAULT_TRANSCRIPTION_INSTRUCTIONS = "Transcribe the long s as s rather than f."
+DEFAULT_TRANSCRIPTION_INSTRUCTIONS = "Transcribe the long s as s rather than f. Before each article, place its heading on its own line as [[ARTICLE: heading exactly as printed]]. Mark only headings printed on the page that begin a distinct item; never the running head, page number, or periodical title. If the page opens mid-item with no heading, begin with [[CONTINUED]]. Leave the body text otherwise unchanged."
 
 # PPPP_YYYYMMDD_FFFFFFF_NNNN.jpeg -- anything not matching this shape is not a page.
 # Digit counts are deliberately unpinned except for the date: publication ids run to 4

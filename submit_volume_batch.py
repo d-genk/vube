@@ -26,7 +26,7 @@ Example:
     python submit_volume_batch.py         --source-bucket my-source-bucket         --key-prefix collections/periodicals         --profile vube-source         --email you@example.org         --count 25
 """
 
-# python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix BP2/ --profile vube --folders-file "batches_02.csv" --dedup-index dedup_index.json --count 25 --email daniel.genkins@gmail.com --ledger submitted_jobs_bp2.jsonl
+# python submit_volume_batch.py --source-bucket vubp-image-mls-825428742173-us-east-1-an --key-prefix BP2/ --profile vube --folders-file "batches_03.csv" --dedup-index dedup_index_batch03.json --count 7 --email daniel.genkins@gmail.com --ledger submitted_jobs_bp3.jsonl
 
 import sys
 import time
